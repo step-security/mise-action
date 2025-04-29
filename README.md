@@ -39,15 +39,3 @@ jobs:
       # .tool-versions will be read from repo root
       - run: node ./my_app.js
 ```
-
-Alternatively, mise is easy to use in GitHub Actions even without this:
-
-```yaml
-jobs:
-  build:
-    steps:
-    - run: |
-        curl https://mise.run | sh
-        echo "$HOME/.local/share/mise/bin" >> $GITHUB_PATH
-        echo "$HOME/.local/share/mise/shims" >> $GITHUB_PATH
-```
