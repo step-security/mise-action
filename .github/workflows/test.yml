@@ -1,0 +1,63 @@
+name: 'build-test'
+on: # rebuild any PRs and main branch changes
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'releases/*'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  build: # make sure build/ci work properly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          npm install
+      - run: |
+          npm run all
+  test: # make sure the action works on a clean machine without building
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+          - ubuntu-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup mise
+        uses: ./
+        with:
+          mise_toml: |
+            [tools]
+            node = "22.0.0"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: mise --version
+      - run: mise x node -- node -v
+      - run: which node
+      - run: node --version
+      - run: . scripts/test.sh
+        shell: bash
+  specific_version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup mise
+        uses: ./
+        with:
+          cache_save: ${{ github.ref_name == 'main' }}
+          cache_key_prefix: mise-v1
+          version: 2024.9.6
+          install_args: bun
+          mise_toml: |
+            [tools]
+            bun = "1"
+      - run: which bun
+      - run: bun -v
