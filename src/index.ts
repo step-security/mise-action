@@ -42,6 +42,9 @@ async function run(): Promise<void> {
     const version = core.getInput('version')
     await setupMise(version)
     await setEnvVars()
+    if (core.getBooleanInput('reshim')) {
+      await miseReshim()
+    }
     await testMise()
     if (core.getBooleanInput('install')) {
       await miseInstall()
@@ -69,6 +72,15 @@ async function setEnvVars(): Promise<void> {
   const logLevel = core.getInput('log_level')
   if (logLevel) set('MISE_LOG_LEVEL', logLevel)
 
+  const githubToken = core.getInput('github_token')
+  if (githubToken) {
+    set('GITHUB_TOKEN', githubToken)
+  } else {
+    core.warning(
+      'No GITHUB_TOKEN provided. You may hit GitHub API rate limits when installing tools from GitHub.'
+    )
+  }
+
   set('MISE_TRUSTED_CONFIG_PATHS', process.cwd())
   set('MISE_YES', '1')
 
@@ -81,7 +93,14 @@ async function restoreMiseCache(): Promise<string | undefined> {
   core.startGroup('Restoring mise cache')
   const version = core.getInput('version')
   const installArgs = core.getInput('install_args')
-  const { MISE_ENV } = process.env
+  // all env vars that start with MISE_ are used in the cache key
+  // this allows users to set MISE_ENV or other variables that affect the cache
+  // without having to modify the cache key prefix
+  const env_key = JSON.stringify(
+    Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => key.startsWith('MISE_'))
+    )
+  )
   const cachePath = miseDir()
   const fileHash = await glob.hashFiles(
     [
@@ -117,8 +136,8 @@ async function restoreMiseCache(): Promise<string | undefined> {
   if (version) {
     primaryKey = `${primaryKey}-${version}`
   }
-  if (MISE_ENV) {
-    primaryKey = `${primaryKey}-${MISE_ENV}`
+  if (env_key) {
+    primaryKey = `${primaryKey}-${env_key}`
   }
   if (installArgs) {
     const tools = installArgs
@@ -228,6 +247,7 @@ const testMise = async (): Promise<number> => mise(['--version'])
 const miseInstall = async (): Promise<number> =>
   mise([`install ${core.getInput('install_args')}`])
 const miseLs = async (): Promise<number> => mise([`ls`])
+const miseReshim = async (): Promise<number> => mise([`reshim`, `--all`])
 const mise = async (args: string[]): Promise<number> =>
   core.group(`Running mise ${args.join(' ')}`, async () => {
     const cwd =
