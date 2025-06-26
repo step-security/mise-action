@@ -69953,6 +69953,20 @@ const fs = __importStar(__nccwpck_require__(9896));
 const os = __importStar(__nccwpck_require__(857));
 const path = __importStar(__nccwpck_require__(6928));
 const axios_1 = __importStar(__nccwpck_require__(7269));
+function validateVersion(version) {
+    if (!version) {
+        throw new Error('Version cannot be empty');
+    }
+    // Allow only numbers and dots for mise versions (e.g., 2024.12.7, 2.8.0)
+    if (!/^[0-9.]+$/.test(version)) {
+        throw new Error(`Invalid version format: ${version}. Only numbers and dots are allowed.`);
+    }
+    // Additional length check to prevent excessive input
+    if (version.length > 20) {
+        throw new Error('Version string too long');
+    }
+    return version.replace(/^v/, ''); // Remove 'v' prefix if present
+}
 async function validateSubscription() {
     const API_URL = `https://agent.api.stepsecurity.io/v1/github/${process.env.GITHUB_REPOSITORY}/actions/subscription`;
     try {
@@ -70106,8 +70120,10 @@ async function setupMise(version) {
                 : (await zstdInstalled())
                     ? '.tar.zst'
                     : '.tar.gz';
-        version = (version || (await latestMiseVersion())).replace(/^v/, '');
-        const url = `https://github.com/jdx/mise/releases/download/v${version}/mise-v${version}-${await getTarget()}${ext}`;
+        // Validate version input to prevent injection attacks
+        const rawVersion = version || (await latestMiseVersion());
+        const validatedVersion = validateVersion(rawVersion);
+        const url = `https://github.com/jdx/mise/releases/download/v${validatedVersion}/mise-v${validatedVersion}-${await getTarget()}${ext}`;
         const archivePath = path.join(os.tmpdir(), `mise${ext}`);
         switch (ext) {
             case '.zip':
