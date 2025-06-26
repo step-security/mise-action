@@ -54,17 +54,3 @@ When installing tools hosted on GitHub (like `gh`, `node`, `bun`, etc.), mise ne
 ```
 
 **Note:** The action automatically uses `${{ github.token }}` as the default, so in most cases you don't need to explicitly provide it. However, if you encounter rate limit errors, make sure the token is being passed correctly.
-
-## Alternative Installation
-
-Alternatively, mise is easy to use in GitHub Actions even without this:
-
-```yaml
-jobs:
-  build:
-    steps:
-    - run: |
-        curl https://mise.run | sh
-        echo "$HOME/.local/share/mise/bin" >> $GITHUB_PATH
-        echo "$HOME/.local/share/mise/shims" >> $GITHUB_PATH
-```
