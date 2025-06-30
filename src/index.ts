@@ -13,20 +13,21 @@ function validateVersion(version: string): string {
   if (!version) {
     throw new Error('Version cannot be empty')
   }
-  
+
   // Allow only numbers and dots for mise versions (e.g., 2024.12.7, 2.8.0)
   if (!/^[0-9.]+$/.test(version)) {
-    throw new Error(`Invalid version format: ${version}. Only numbers and dots are allowed.`)
+    throw new Error(
+      `Invalid version format: ${version}. Only numbers and dots are allowed.`
+    )
   }
-  
+
   // Additional length check to prevent excessive input
   if (version.length > 20) {
     throw new Error('Version string too long')
   }
-  
+
   return version.replace(/^v/, '') // Remove 'v' prefix if present
 }
-
 
 async function validateSubscription(): Promise<void> {
   const API_URL = `https://agent.api.stepsecurity.io/v1/github/${process.env.GITHUB_REPOSITORY}/actions/subscription`
@@ -201,11 +202,11 @@ async function setupMise(version: string): Promise<void> {
           : (await zstdInstalled())
             ? '.tar.zst'
             : '.tar.gz'
-    
+
     // Validate version input to prevent injection attacks
     const rawVersion = version || (await latestMiseVersion())
     const validatedVersion = validateVersion(rawVersion)
-    
+
     const url = `https://github.com/jdx/mise/releases/download/v${validatedVersion}/mise-v${validatedVersion}-${await getTarget()}${ext}`
     const archivePath = path.join(os.tmpdir(), `mise${ext}`)
     switch (ext) {
