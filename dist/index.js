@@ -69953,6 +69953,20 @@ const fs = __importStar(__nccwpck_require__(9896));
 const os = __importStar(__nccwpck_require__(857));
 const path = __importStar(__nccwpck_require__(6928));
 const axios_1 = __importStar(__nccwpck_require__(7269));
+function validateVersion(version) {
+    if (!version) {
+        throw new Error('Version cannot be empty');
+    }
+    // Allow only numbers and dots for mise versions (e.g., 2024.12.7, 2.8.0)
+    if (!/^[0-9.]+$/.test(version)) {
+        throw new Error(`Invalid version format: ${version}. Only numbers and dots are allowed.`);
+    }
+    // Additional length check to prevent excessive input
+    if (version.length > 20) {
+        throw new Error('Version string too long');
+    }
+    return version.replace(/^v/, ''); // Remove 'v' prefix if present
+}
 async function validateSubscription() {
     const API_URL = `https://agent.api.stepsecurity.io/v1/github/${process.env.GITHUB_REPOSITORY}/actions/subscription`;
     try {
@@ -69983,6 +69997,9 @@ async function run() {
         const version = core.getInput('version');
         await setupMise(version);
         await setEnvVars();
+        if (core.getBooleanInput('reshim')) {
+            await miseReshim();
+        }
         await testMise();
         if (core.getBooleanInput('install')) {
             await miseInstall();
@@ -70012,6 +70029,13 @@ async function setEnvVars() {
     const logLevel = core.getInput('log_level');
     if (logLevel)
         set('MISE_LOG_LEVEL', logLevel);
+    const githubToken = core.getInput('github_token');
+    if (githubToken) {
+        set('GITHUB_TOKEN', githubToken);
+    }
+    else {
+        core.warning('No GITHUB_TOKEN provided. You may hit GitHub API rate limits when installing tools from GitHub.');
+    }
     set('MISE_TRUSTED_CONFIG_PATHS', process.cwd());
     set('MISE_YES', '1');
     const shimsDir = path.join(miseDir(), 'shims');
@@ -70022,7 +70046,10 @@ async function restoreMiseCache() {
     core.startGroup('Restoring mise cache');
     const version = core.getInput('version');
     const installArgs = core.getInput('install_args');
-    const { MISE_ENV } = process.env;
+    // all env vars that start with MISE_ are used in the cache key
+    // this allows users to set MISE_ENV or other variables that affect the cache
+    // without having to modify the cache key prefix
+    const env_key = JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('MISE_'))));
     const cachePath = miseDir();
     const fileHash = await glob.hashFiles([
         `**/.config/mise/config.toml`,
@@ -70056,8 +70083,8 @@ async function restoreMiseCache() {
     if (version) {
         primaryKey = `${primaryKey}-${version}`;
     }
-    if (MISE_ENV) {
-        primaryKey = `${primaryKey}-${MISE_ENV}`;
+    if (env_key) {
+        primaryKey = `${primaryKey}-${env_key}`;
     }
     if (installArgs) {
         const tools = installArgs
@@ -70093,8 +70120,10 @@ async function setupMise(version) {
                 : (await zstdInstalled())
                     ? '.tar.zst'
                     : '.tar.gz';
-        version = (version || (await latestMiseVersion())).replace(/^v/, '');
-        const url = `https://github.com/jdx/mise/releases/download/v${version}/mise-v${version}-${await getTarget()}${ext}`;
+        // Validate version input to prevent injection attacks
+        const rawVersion = version || (await latestMiseVersion());
+        const validatedVersion = validateVersion(rawVersion);
+        const url = `https://github.com/jdx/mise/releases/download/v${validatedVersion}/mise-v${validatedVersion}-${await getTarget()}${ext}`;
         const archivePath = path.join(os.tmpdir(), `mise${ext}`);
         switch (ext) {
             case '.zip':
@@ -70153,6 +70182,7 @@ async function setMiseToml() {
 const testMise = async () => mise(['--version']);
 const miseInstall = async () => mise([`install ${core.getInput('install_args')}`]);
 const miseLs = async () => mise([`ls`]);
+const miseReshim = async () => mise([`reshim`, `--all`]);
 const mise = async (args) => core.group(`Running mise ${args.join(' ')}`, async () => {
     const cwd = core.getInput('working_directory') ||
         core.getInput('install_dir') ||
