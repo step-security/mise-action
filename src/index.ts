@@ -9,26 +9,6 @@ import * as os from 'os'
 import * as path from 'path'
 import axios, { isAxiosError } from 'axios'
 
-// function validateVersion(version: string): string {
-//   if (!version) {
-//     throw new Error('Version cannot be empty')
-//   }
-
-//   // Allow only numbers and dots for mise versions (e.g., 2024.12.7, 2.8.0)
-//   if (!/^[0-9.]+$/.test(version)) {
-//     throw new Error(
-//       `Invalid version format: ${version}. Only numbers and dots are allowed.`
-//     )
-//   }
-
-//   // Additional length check to prevent excessive input
-//   if (version.length > 20) {
-//     throw new Error('Version string too long')
-//   }
-
-//   return version.replace(/^v/, '') // Remove 'v' prefix if present
-// }
-
 async function validateSubscription(): Promise<void> {
   const API_URL = `https://agent.api.stepsecurity.io/v1/github/${process.env.GITHUB_REPOSITORY}/actions/subscription`
 

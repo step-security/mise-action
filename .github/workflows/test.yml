@@ -1,10 +1,11 @@
 name: 'build-test'
 on: # rebuild any PRs and main branch changes
   pull_request:
+    branches:
+      - main
   push:
     branches:
       - main
-      - 'releases/*'
   workflow_dispatch:
 
 concurrency:
@@ -91,7 +92,6 @@ jobs:
       - run: which bun
       - run: bun -v
 
-
   checksum_failure:
     runs-on: ubuntu-latest
     steps:
@@ -116,3 +116,21 @@ jobs:
           echo "Expected failure but the job was ${{ steps.bad.outcome }}"
           exit 1
         if: ${{ steps.bad.outcome != 'failure' }}
+
+  fetch_from_github:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup mise from mise.jdx.dev
+        uses: ./
+        with:
+          fetch_from_github: true
+          cache: false
+          cache_save: false
+          mise_toml: |
+            [tools]
+            jq = "1.7.1"
+      - run: mise --version
+      - run: mise x jq -- jq --version
+      - run: which jq
+      - run: jq --version
