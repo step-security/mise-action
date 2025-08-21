@@ -15,7 +15,7 @@ async function validateSubscription(): Promise<void> {
   try {
     await axios.get(API_URL, { timeout: 3000 })
   } catch (error) {
-    if (isAxiosError(error) && error.response) {
+    if (isAxiosError(error) && error.response?.status === 403) {
       core.error(
         'Subscription is not valid. Reach out to support@stepsecurity.io'
       )
@@ -54,6 +54,11 @@ async function run(): Promise<void> {
       }
     }
     await miseLs()
+    const loadEnv = core.getBooleanInput('env')
+    if (loadEnv) {
+      const output = await exec.getExecOutput('mise', ['env', '--dotenv'])
+      fs.appendFileSync(process.env.GITHUB_ENV!, output.stdout)
+    }
   } catch (err) {
     if (err instanceof Error) core.setFailed(err.message)
     else throw err
