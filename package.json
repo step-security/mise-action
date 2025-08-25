@@ -1,7 +1,7 @@
 {
   "name": "mise-action",
   "description": "mise tool setup action",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "author": "step-security",
   "private": true,
   "repository": {
@@ -34,6 +34,7 @@
     "@actions/core": "^1.11.1",
     "@actions/exec": "^1.1.1",
     "@actions/glob": "^0.5.0",
+    "@types/handlebars": "^4.0.40",
     "axios": "^1.9.0",
     "handlebars": "^4.7.8"
   },
