@@ -47,7 +47,7 @@ jobs:
 You can customize the cache key used by the action:
 
 ```yaml
-- uses: jdx/mise-action@v2
+- uses: step-security/mise-action@v2
   with:
     cache_key: "my-custom-cache-key"  # Override the entire cache key
     cache_key_prefix: "mise-v1"       # Or just change the prefix (default: "mise-v0")
@@ -58,7 +58,7 @@ You can customize the cache key used by the action:
 When using `cache_key`, you can use template variables to reference internal values:
 
 ```yaml
-- uses: jdx/mise-action@v2
+- uses: step-security/mise-action@v2
   with:
     cache_key: "mise-{{platform}}-{{version}}-{{file_hash}}"
     version: "2024.10.0"
@@ -78,7 +78,7 @@ Conditional logic is also supported using Handlebars syntax like `{{#if version}
 
 Example using multiple variables:
 ```yaml
-- uses: jdx/mise-action@v2
+- uses: step-security/mise-action@v2
   with:
     cache_key: "mise-v1-{{platform}}-{{install_args_hash}}-{{file_hash}}"
     install_args: "node@20 python@3.12"
@@ -86,7 +86,7 @@ Example using multiple variables:
 
 You can also extend the default cache key:
 ```yaml
-- uses: jdx/mise-action@v2
+- uses: step-security/mise-action@v2
   with:
     cache_key: "{{default}}-custom-suffix"
     install_args: "node@20 python@3.12"
