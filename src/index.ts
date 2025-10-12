@@ -145,6 +145,11 @@ async function exportMiseEnv(): Promise<void> {
   core.endGroup()
 }
 
+function cleanVersion(version: string) {
+  // remove 'v' prefix if present
+  return version.replace(/^v/, '')
+}
+
 function checkMiseSupportsRedacted(): boolean {
   const version = core.getInput('version')
 
@@ -153,9 +158,7 @@ function checkMiseSupportsRedacted(): boolean {
     return true
   }
 
-  // Parse the version string (remove 'v' prefix if present)
-  const cleanVersion = version.replace(/^v/, '')
-  const versionMatch = cleanVersion.match(/^(\d+)\.(\d+)\.(\d+)/)
+  const versionMatch = cleanVersion(version).match(/^(\d+)\.(\d+)\.(\d+)/)
 
   if (!versionMatch) {
     // If we can't parse the version, assume it supports redacted
@@ -284,7 +287,7 @@ async function setupMise(
         break
     }
   } else {
-    const requestedVersion = core.getInput('version')
+    const requestedVersion = cleanVersion(core.getInput('version'))
     if (requestedVersion !== '') {
       const versionOutput = await exec.getExecOutput(
         miseBinPath,
@@ -292,7 +295,7 @@ async function setupMise(
         { silent: true }
       )
       const versionJson = JSON.parse(versionOutput.stdout)
-      const version = versionJson.version.split(' ')[0]
+      const version = cleanVersion(versionJson.version.split(' ')[0])
       if (requestedVersion === version) {
         core.info(`mise already installed`)
       } else {
