@@ -78506,9 +78506,11 @@ async function setEnvVars() {
     }
     set('MISE_TRUSTED_CONFIG_PATHS', process.cwd());
     set('MISE_YES', '1');
-    const shimsDir = path.join(miseDir(), 'shims');
-    core.info(`Adding ${shimsDir} to PATH`);
-    core.addPath(shimsDir);
+    if (core.getBooleanInput('add_shims_to_path')) {
+        const shimsDir = path.join(miseDir(), 'shims');
+        core.info(`Adding ${shimsDir} to PATH`);
+        core.addPath(shimsDir);
+    }
 }
 async function restoreMiseCache() {
     core.startGroup('Restoring mise cache');
@@ -78585,9 +78587,7 @@ async function setupMise(version, fetchFromGitHub = false) {
             }
             else {
                 core.info(`mise already installed (${version}), but different version requested (${requestedVersion})`);
-                await exec.exec(miseBinPath, ['self-update', requestedVersion, '-y'], {
-                    silent: true
-                });
+                await exec.exec(miseBinPath, ['self-update', requestedVersion, '-y']);
                 core.info(`mise updated to version ${requestedVersion}`);
             }
         }
@@ -78640,9 +78640,10 @@ const mise = async (args) => await core.group(`Running mise ${args.join(' ')}`, 
     const cwd = core.getInput('working_directory') ||
         core.getInput('install_dir') ||
         process.cwd();
+    const baseEnv = Object.fromEntries(Object.entries(process.env).filter((entry) => entry[1] !== undefined));
     const env = core.isDebug()
-        ? { ...process.env, MISE_LOG_LEVEL: 'debug' }
-        : undefined;
+        ? { ...baseEnv, MISE_LOG_LEVEL: 'debug' }
+        : baseEnv;
     if (args.length === 1) {
         return exec.exec(`mise ${args}`, [], {
             cwd,
@@ -78662,6 +78663,9 @@ function miseDir() {
     const dir = core.getState('MISE_DIR');
     if (dir)
         return dir;
+    const miseDir = core.getInput('mise_dir');
+    if (miseDir)
+        return miseDir;
     const { MISE_DATA_DIR, XDG_DATA_HOME, LOCALAPPDATA } = process.env;
     if (MISE_DATA_DIR)
         return MISE_DATA_DIR;
