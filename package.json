@@ -23,8 +23,7 @@
     "format:write": "prettier --write **/*.ts",
     "lint": "npx eslint . && npm run format:check",
     "package": "ncc build -s src/index.ts --license licenses.txt",
-    "package:watch": "npm run package -- --watch",
-    "prepare": "husky"
+    "package:watch": "npm run package -- --watch"
   },
   "license": "MIT",
   "dependencies": {
@@ -44,7 +43,6 @@
     "@vercel/ncc": "^0.38.3",
     "eslint": "^9.15.0",
     "globals": "^16.0.0",
-    "husky": "^9.1.7",
     "jest": "^29.7.0",
     "js-yaml": "^4.1.0",
     "prettier": "^3.4.1",
