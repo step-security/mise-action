@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: step-security/mise-action@v4
         with:
-          version: 2024.10.0 # [default: latest] mise version to install
+          version: 2026.3.10 # [default: latest] mise version to install
           install: true # [default: true] run `mise install`
           install_args: "bun" # [default: ""] additional arguments to `mise install`
           cache: true # [default: true] cache mise using GitHub's cache
