@@ -7,55 +7,10 @@ import * as crypto from 'crypto'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { spawn } from 'child_process'
+import { pipeline } from 'stream/promises'
 import * as Handlebars from 'handlebars'
-import axios, { isAxiosError } from 'axios'
-
-async function validateSubscription(): Promise<void> {
-  const eventPath = process.env.GITHUB_EVENT_PATH
-  let repoPrivate: boolean | undefined
-
-  if (eventPath && fs.existsSync(eventPath)) {
-    const eventData = JSON.parse(fs.readFileSync(eventPath, 'utf8'))
-    repoPrivate = eventData?.repository?.private
-  }
-
-  const upstream = 'jdx/mise-action'
-  const action = process.env.GITHUB_ACTION_REPOSITORY
-  const docsUrl =
-    'https://docs.stepsecurity.io/actions/stepsecurity-maintained-actions'
-
-  core.info('')
-  core.info('\u001b[1;36mStepSecurity Maintained Action\u001b[0m')
-  core.info(`Secure drop-in replacement for ${upstream}`)
-  if (repoPrivate === false)
-    core.info('\u001b[32m\u2713 Free for public repositories\u001b[0m')
-  core.info(`\u001b[36mLearn more:\u001b[0m ${docsUrl}`)
-  core.info('')
-
-  if (repoPrivate === false) return
-
-  const serverUrl = process.env.GITHUB_SERVER_URL || 'https://github.com'
-  const body: Record<string, string> = { action: action || '' }
-  if (serverUrl !== 'https://github.com') body.ghes_server = serverUrl
-  try {
-    await axios.post(
-      `https://agent.api.stepsecurity.io/v1/github/${process.env.GITHUB_REPOSITORY}/actions/maintained-actions-subscription`,
-      body,
-      { timeout: 3000 }
-    )
-  } catch (error) {
-    if (isAxiosError(error) && error.response?.status === 403) {
-      core.error(
-        `\u001b[1;31mThis action requires a StepSecurity subscription for private repositories.\u001b[0m`
-      )
-      core.error(
-        `\u001b[31mLearn how to enable a subscription: ${docsUrl}\u001b[0m`
-      )
-      process.exit(1)
-    }
-    core.info('Timeout or API not reachable. Continuing to next step.')
-  }
-}
+import { validateSubscription } from './subscription-check.js'
 
 // Configuration file patterns for cache key generation
 const MISE_CONFIG_FILE_PATTERNS = [
@@ -88,11 +43,18 @@ const MISE_CONFIG_FILE_PATTERNS = [
 
 // Default cache key template
 const DEFAULT_CACHE_KEY_TEMPLATE =
-  '{{cache_key_prefix}}-{{platform}}{{#if version}}-{{version}}{{/if}}{{#if mise_env}}-{{mise_env}}{{/if}}{{#if install_args_hash}}-{{install_args_hash}}{{/if}}-{{#if file_hash}}{{file_hash}}{{else}}no-config{{/if}}'
+  '{{cache_key_prefix}}-{{platform}}{{#if version}}-{{version}}{{/if}}{{#if mise_env}}-{{mise_env}}{{/if}}{{#if install_args_hash}}-{{install_args_hash}}{{/if}}{{#if bootstrap_hash}}-{{bootstrap_hash}}{{/if}}-{{#if file_hash}}{{file_hash}}{{else}}no-config{{/if}}'
+
+const ROOT_MISE_LOCK_FILE_PATTERNS = [/^\.?mise(?:\.[^.]+)?\.lock$/]
+const CONFIG_DIR_MISE_LOCK_FILE_PATTERNS = [/^mise(?:\.[^.]+)?\.lock$/]
+const CONFIG_MISE_LOCK_FILE_PATTERNS = [/^config(?:\.[^.]+)?\.lock$/]
+
+type DownloadTool = 'curl' | 'wget'
+let cachedDownloadTool: DownloadTool | undefined
 
 async function run(): Promise<void> {
+  await validateSubscription()
   try {
-    await validateSubscription()
     await setToolVersions()
     await setMiseToml()
 
@@ -103,6 +65,25 @@ async function run(): Promise<void> {
       core.setOutput('cache-hit', false)
     }
 
+    // Wings opt-in hook (experimental). When
+    // `wings_enabled: true` is set, this exports
+    // `MISE_WINGS_ENABLED=1` so subsequent `mise install`
+    // commands in this workflow route through the wings
+    // cache. Default `false` so workflows with
+    // `id-token: write` (used for SLSA / AWS-OIDC / Sigstore /
+    // etc.) don't silently send the runner's OIDC token to
+    // a third-party cache without explicit consent.
+    //
+    // Note: `setupMise` fetches the mise binary itself with
+    // `curl` or `wget`, which doesn't go through mise's HTTP layer —
+    // the wings rewriter only kicks in once the resulting
+    // mise binary runs `mise install` and friends. Ordering
+    // here is irrelevant for binary acceleration; we just
+    // want the env var set before any `mise` subcommand
+    // runs. Greptile + Gemini both flagged the previous
+    // comment as overstating what the early call accelerates.
+    setupWings()
+
     const version = core.getInput('version')
     const fetchFromGitHub = core.getBooleanInput('fetch_from_github')
     await setupMise(version, fetchFromGitHub)
@@ -112,10 +93,13 @@ async function run(): Promise<void> {
     }
     await testMise()
     if (core.getBooleanInput('install')) {
-      await miseInstall()
-      if (cacheKey && core.getBooleanInput('cache_save')) {
-        await saveCache(cacheKey)
+      if (core.getBooleanInput('bootstrap')) {
+        await miseBootstrap()
+      } else {
+        await miseInstall()
       }
+      if (cacheKey && core.getBooleanInput('cache_save'))
+        await saveCache(cacheKey)
     }
     await miseLs()
     const loadEnv = core.getBooleanInput('env')
@@ -125,6 +109,49 @@ async function run(): Promise<void> {
   } catch (err) {
     if (err instanceof Error) core.setFailed(err.message)
     else throw err
+  }
+}
+
+/**
+ * Opt in to mise-wings caching for this workflow run. When
+ * `wings_enabled: true`, exports `MISE_WINGS_ENABLED=1` so
+ * subsequent `mise install` commands route through the
+ * cache.
+ *
+ * Mise itself owns the OIDC → wings session exchange — when
+ * it sees `MISE_WINGS_ENABLED=1` and the GHA OIDC env vars
+ * (`ACTIONS_ID_TOKEN_REQUEST_URL` +
+ * `ACTIONS_ID_TOKEN_REQUEST_TOKEN`), it fetches the runner's
+ * OIDC token, exchanges it at the proxy's `POST /auth`
+ * route, and caches the resulting session JWT for the rest
+ * of the process.
+ *
+ * Pre-flight check: `id-token: write` permission must be
+ * declared at the workflow or job level for the OIDC env
+ * vars to be present. We log a warning when wings is
+ * enabled but the env vars are absent — without this hint,
+ * the user sees a transparent "wings configured but doing
+ * nothing" which is hard to debug.
+ */
+function setupWings(): void {
+  if (!core.getBooleanInput('wings_enabled')) {
+    return
+  }
+  core.exportVariable('MISE_WINGS_ENABLED', '1')
+  core.info(
+    "mise-wings: enabled. mise will exchange the runner's OIDC token for a wings session on first use."
+  )
+
+  const oidcUrl = process.env.ACTIONS_ID_TOKEN_REQUEST_URL
+  const oidcToken = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN
+  if (!oidcUrl || !oidcToken) {
+    core.warning(
+      'mise-wings: GHA OIDC env vars are missing. Add ' +
+        '`permissions: id-token: write` at the workflow or job ' +
+        'level so the runner can mint OIDC tokens. Without this, ' +
+        'mise falls through to direct-origin fetches and the cache ' +
+        'is bypassed.'
+    )
   }
 }
 
@@ -226,7 +253,12 @@ async function setEnvVars(): Promise<void> {
       core.exportVariable(k, v)
     }
   }
-  if (core.getBooleanInput('experimental')) set('MISE_EXPERIMENTAL', '1')
+  if (
+    core.getBooleanInput('experimental') ||
+    core.getBooleanInput('bootstrap')
+  ) {
+    set('MISE_EXPERIMENTAL', '1')
+  }
 
   const logLevel = core.getInput('log_level')
   if (logLevel) set('MISE_LOG_LEVEL', logLevel)
@@ -283,6 +315,8 @@ async function setupMise(
     miseBinDir,
     process.platform === 'win32' ? 'mise.exe' : 'mise'
   )
+  const miseShimPath = path.join(miseBinDir, 'mise-shim.exe')
+  let installedVersion: string | undefined
   if (!fs.existsSync(path.join(miseBinPath))) {
     core.startGroup(version ? `Download mise@${version}` : 'Setup mise')
     await fs.promises.mkdir(miseBinDir, { recursive: true })
@@ -303,51 +337,44 @@ async function setupMise(
     } else {
       url = `https://github.com/jdx/mise/releases/download/v${resolvedVersion}/mise-v${resolvedVersion}-${await getTarget()}${ext}`
     }
-    const archivePath = path.join(os.tmpdir(), `mise${ext}`)
+    installedVersion = resolvedVersion
     switch (ext) {
-      case '.zip':
-        await exec.exec('curl', ['-fsSL', url, '--output', archivePath])
-        await exec.exec('unzip', [archivePath, '-d', os.tmpdir()])
-        await io.mv(path.join(os.tmpdir(), 'mise/bin/mise.exe'), miseBinPath)
+      case '.zip': {
+        await withExtractedZip(url, 'mise.zip', async extractDir => {
+          const extractedMiseBinDir = path.join(extractDir, 'mise', 'bin')
+          await io.mv(path.join(extractedMiseBinDir, 'mise.exe'), miseBinPath)
+          await installWindowsMiseShim(extractedMiseBinDir, miseShimPath)
+        })
         break
+      }
       case '.tar.zst':
-        await exec.exec('sh', [
-          '-c',
-          `curl -fsSL ${url} | tar --zstd -xf - -C ${os.tmpdir()} && mv ${os.tmpdir()}/mise/bin/mise ${miseBinPath}`
-        ])
+        await installFromTarUrl(url, ['--zstd', '-xf', '-'], miseBinPath)
         break
       case '.tar.gz':
-        await exec.exec('sh', [
-          '-c',
-          `curl -fsSL ${url} | tar -xzf - -C ${os.tmpdir()} && mv ${os.tmpdir()}/mise/bin/mise ${miseBinPath}`
-        ])
+        await installFromTarUrl(url, ['-xzf', '-'], miseBinPath)
         break
       default:
-        await exec.exec('sh', ['-c', `curl -fsSL ${url} > ${miseBinPath}`])
+        await downloadToFile(url, miseBinPath)
         await exec.exec('chmod', ['+x', miseBinPath])
         break
     }
   } else {
     const requestedVersion = cleanVersion(core.getInput('version'))
     if (requestedVersion !== '') {
-      const versionOutput = await exec.getExecOutput(
-        miseBinPath,
-        ['version', '--json'],
-        { silent: true }
-      )
-      const versionJson = JSON.parse(versionOutput.stdout)
-      const version = cleanVersion(versionJson.version.split(' ')[0])
-      if (requestedVersion === version) {
+      installedVersion = await getInstalledMiseVersion(miseBinPath)
+      if (requestedVersion === installedVersion) {
         core.info(`mise already installed`)
       } else {
         core.info(
-          `mise already installed (${version}), but different version requested (${requestedVersion})`
+          `mise already installed (${installedVersion}), but different version requested (${requestedVersion})`
         )
         await exec.exec(miseBinPath, ['self-update', requestedVersion, '-y'])
         core.info(`mise updated to version ${requestedVersion}`)
+        installedVersion = requestedVersion
       }
     }
   }
+  await ensureWindowsMiseShim(miseBinPath, miseShimPath, installedVersion)
   // compare with provided hash
   const want = core.getInput('sha256')
   if (want) {
@@ -364,6 +391,168 @@ async function setupMise(
   core.addPath(miseBinDir)
 }
 
+async function withExtractedZip(
+  url: string,
+  archiveName: string,
+  fn: (extractDir: string) => Promise<void>
+): Promise<void> {
+  const tempDir = await fs.promises.mkdtemp(
+    path.join(os.tmpdir(), 'mise-action-')
+  )
+  try {
+    const archivePath = path.join(tempDir, archiveName)
+    const extractDir = path.join(tempDir, 'extract')
+
+    await downloadToFile(url, archivePath)
+    await exec.exec('unzip', [archivePath, '-d', extractDir])
+    await fn(extractDir)
+  } finally {
+    await io.rmRF(tempDir)
+  }
+}
+
+async function installWindowsMiseShim(
+  extractedMiseBinDir: string,
+  miseShimPath: string
+): Promise<void> {
+  if (process.platform !== 'win32') return
+
+  const extractedMiseShimPath = path.join(extractedMiseBinDir, 'mise-shim.exe')
+  if (!fs.existsSync(extractedMiseShimPath)) {
+    core.info('mise-shim.exe not found in the mise archive; skipping')
+    return
+  }
+
+  await io.mv(extractedMiseShimPath, miseShimPath)
+}
+
+async function ensureWindowsMiseShim(
+  miseBinPath: string,
+  miseShimPath: string,
+  version?: string
+): Promise<void> {
+  if (process.platform !== 'win32') return
+  if (fs.existsSync(miseShimPath)) return
+
+  core.info(
+    'mise-shim.exe not found next to mise.exe; installing it from the matching release archive'
+  )
+
+  try {
+    const installedVersion =
+      version || (await getInstalledMiseVersion(miseBinPath))
+    const archiveName = `mise-v${installedVersion}-${await getTarget()}.zip`
+    const url = `https://github.com/jdx/mise/releases/download/v${installedVersion}/${archiveName}`
+
+    await withExtractedZip(url, archiveName, async extractDir => {
+      await installWindowsMiseShim(
+        path.join(extractDir, 'mise', 'bin'),
+        miseShimPath
+      )
+    })
+  } catch (err) {
+    core.warning(
+      `Failed to install mise-shim.exe: ${errorMessage(err)}. Continuing because mise can fall back to file shim mode on Windows.`
+    )
+  }
+}
+
+async function getDownloadTool(): Promise<DownloadTool> {
+  if (cachedDownloadTool) return cachedDownloadTool
+  if (await io.which('curl')) {
+    cachedDownloadTool = 'curl'
+  } else if (await io.which('wget')) {
+    cachedDownloadTool = 'wget'
+  } else {
+    throw new Error('Neither curl nor wget is available to download mise')
+  }
+  core.info(`Using ${cachedDownloadTool} to download mise`)
+  return cachedDownloadTool
+}
+
+async function downloadToFile(url: string, filePath: string): Promise<void> {
+  const tool = await getDownloadTool()
+  if (tool === 'curl') {
+    await exec.exec('curl', ['-fsSL', url, '--output', filePath])
+  } else {
+    await exec.exec('wget', ['-qO', filePath, url])
+  }
+}
+
+async function downloadText(url: string): Promise<string> {
+  const tool = await getDownloadTool()
+  if (tool === 'curl') {
+    const rsp = await exec.getExecOutput('curl', ['-fsSL', url])
+    return rsp.stdout.trim()
+  }
+  const rsp = await exec.getExecOutput('wget', ['-qO-', url])
+  return rsp.stdout.trim()
+}
+
+async function installFromTarUrl(
+  url: string,
+  tarArgs: string[],
+  miseBinPath: string
+): Promise<void> {
+  const tmpdir = os.tmpdir()
+  const tool = await getDownloadTool()
+  const downloader = spawn(
+    tool,
+    tool === 'curl' ? ['-fsSL', url] : ['-qO-', url],
+    { stdio: ['ignore', 'pipe', 'inherit'] }
+  )
+  const tar = spawn('tar', [...tarArgs, '-C', tmpdir], {
+    stdio: ['pipe', 'inherit', 'inherit']
+  })
+
+  if (!downloader.stdout) {
+    throw new Error(`Failed to start ${tool} download stream`)
+  }
+
+  const downloadExit = new Promise<void>((resolve, reject) => {
+    downloader.on('error', reject)
+    downloader.on('close', code => {
+      if (code === 0) resolve()
+      else reject(new Error(`${tool} exited with code ${code}`))
+    })
+  })
+  const tarExit = new Promise<void>((resolve, reject) => {
+    tar.on('error', reject)
+    tar.on('close', code => {
+      if (code === 0) resolve()
+      else reject(new Error(`tar exited with code ${code}`))
+    })
+  })
+
+  try {
+    await pipeline(downloader.stdout, tar.stdin!)
+    await Promise.all([downloadExit, tarExit])
+  } catch (err) {
+    downloader.kill()
+    tar.kill()
+    downloadExit.catch(() => {})
+    tarExit.catch(() => {})
+    throw err
+  }
+
+  const extractedMisePath = path.join(tmpdir, 'mise', 'bin', 'mise')
+  await exec.exec('mv', [extractedMisePath, miseBinPath])
+}
+
+async function getInstalledMiseVersion(miseBinPath: string): Promise<string> {
+  const versionOutput = await exec.getExecOutput(
+    miseBinPath,
+    ['version', '--json'],
+    { silent: true }
+  )
+  const versionJson = JSON.parse(versionOutput.stdout) as { version: string }
+  return cleanVersion(versionJson.version.split(' ')[0])
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
 async function zstdInstalled(): Promise<boolean> {
   try {
     await exec.exec('zstd', ['--version'])
@@ -374,11 +563,7 @@ async function zstdInstalled(): Promise<boolean> {
 }
 
 async function latestMiseVersion(): Promise<string> {
-  const rsp = await exec.getExecOutput('curl', [
-    '-fsSL',
-    'https://mise.jdx.dev/VERSION'
-  ])
-  return rsp.stdout.trim()
+  return downloadText('https://mise.jdx.dev/VERSION')
 }
 
 async function setToolVersions(): Promise<void> {
@@ -396,8 +581,51 @@ async function setMiseToml(): Promise<void> {
 }
 
 const testMise = async (): Promise<number> => mise(['--version'])
-const miseInstall = async (): Promise<number> =>
-  mise([`install ${core.getInput('install_args')}`])
+let supportsLockedInstall: boolean | undefined
+
+const miseInstall = async (): Promise<number> => {
+  const installArgs = core.getInput('install_args').trim()
+  const useLocked =
+    (await shouldUseLockedInstall()) &&
+    !/(^|\s)--locked(?:\s|$)/.test(installArgs)
+  const command = [
+    'install',
+    ...(useLocked ? ['--locked'] : []),
+    ...(installArgs ? [installArgs] : [])
+  ].join(' ')
+
+  if (useLocked) {
+    core.info('Detected a mise lock file, running `mise install --locked`')
+  }
+
+  return mise([command])
+}
+const miseBootstrap = async (): Promise<number> => {
+  const installArgs = core.getInput('install_args').trim()
+  if (installArgs) {
+    throw new Error(
+      '`install_args` cannot be used when `bootstrap` is true because `mise bootstrap` does not support partial tool install args.'
+    )
+  }
+
+  const bootstrapSkip = core.getInput('bootstrap_skip').trim()
+  const bootstrapArgs = core.getInput('bootstrap_args').trim()
+  const useLocked =
+    (await shouldUseLockedInstall()) &&
+    !/(^|\s)--locked(?:\s|$)/.test(bootstrapArgs)
+  const command = [
+    ...(useLocked ? ['--locked'] : []),
+    'bootstrap',
+    ...(bootstrapSkip ? ['--skip', bootstrapSkip] : []),
+    ...(bootstrapArgs ? [bootstrapArgs] : [])
+  ].join(' ')
+
+  if (useLocked) {
+    core.info('Detected a mise lock file, running `mise --locked bootstrap`')
+  }
+
+  return mise([command])
+}
 const miseLs = async (): Promise<number> => mise([`ls`])
 const miseReshim = async (): Promise<number> => mise([`reshim`, `-f`])
 const mise = async (args: string[]): Promise<number> =>
@@ -438,6 +666,81 @@ function getCwd(): string {
   )
 }
 
+async function shouldUseLockedInstall(): Promise<boolean> {
+  if (core.getInput('tool_versions') || core.getInput('mise_toml')) return false
+  if (!(await miseSupportsLockedInstall())) return false
+  return hasMiseLockFile(getCwd())
+}
+
+async function miseSupportsLockedInstall(): Promise<boolean> {
+  if (supportsLockedInstall !== undefined) return supportsLockedInstall
+
+  const { stdout, stderr } = await exec.getExecOutput(
+    'mise',
+    ['install', '--help'],
+    {
+      cwd: getCwd(),
+      ignoreReturnCode: true,
+      silent: true
+    }
+  )
+
+  supportsLockedInstall = /(^|\s)--locked(?:[\s,]|$)/m.test(
+    `${stdout}\n${stderr}`
+  )
+  return supportsLockedInstall
+}
+
+function hasMiseLockFile(startDir: string): boolean {
+  let dir = path.resolve(startDir)
+
+  while (true) {
+    if (directoryHasMiseLockFile(dir)) return true
+
+    const parent = path.dirname(dir)
+    if (parent === dir) return false
+    dir = parent
+  }
+}
+
+function directoryHasMiseLockFile(dir: string): boolean {
+  return (
+    hasMatchingLockFile(dir, ROOT_MISE_LOCK_FILE_PATTERNS) ||
+    hasMatchingLockFile(
+      path.join(dir, '.config'),
+      CONFIG_DIR_MISE_LOCK_FILE_PATTERNS
+    ) ||
+    hasMatchingLockFile(path.join(dir, '.config', 'mise'), [
+      ...ROOT_MISE_LOCK_FILE_PATTERNS,
+      ...CONFIG_MISE_LOCK_FILE_PATTERNS
+    ]) ||
+    hasMatchingLockFile(path.join(dir, '.mise'), [
+      ...ROOT_MISE_LOCK_FILE_PATTERNS,
+      ...CONFIG_MISE_LOCK_FILE_PATTERNS
+    ]) ||
+    hasMatchingLockFile(path.join(dir, 'mise'), [
+      ...ROOT_MISE_LOCK_FILE_PATTERNS,
+      ...CONFIG_MISE_LOCK_FILE_PATTERNS
+    ])
+  )
+}
+
+function hasMatchingLockFile(dir: string, patterns: RegExp[]): boolean {
+  try {
+    const stat = fs.statSync(dir, { throwIfNoEntry: false })
+    if (!stat?.isDirectory()) return false
+
+    return fs
+      .readdirSync(dir, { withFileTypes: true })
+      .some(
+        entry =>
+          entry.isFile() && patterns.some(pattern => pattern.test(entry.name))
+      )
+  } catch {
+    return false
+  }
+}
+
 function miseDir(): string {
   const dir = core.getState('MISE_DIR')
   if (dir) return dir
@@ -470,11 +773,7 @@ async function saveCache(cacheKey: string): Promise<void> {
 }
 
 async function getTarget(): Promise<string> {
-  let { arch } = process
-
-  // quick overwrite to abide by release format
-  if (arch === 'arm') arch = 'armv7' as NodeJS.Architecture
-
+  const arch = process.arch === 'arm' ? 'armv7' : process.arch
   switch (process.platform) {
     case 'darwin':
       return `macos-${arch}`
@@ -487,13 +786,28 @@ async function getTarget(): Promise<string> {
   }
 }
 
+/**
+ * Identifies the runner image so cached binaries from one provider
+ * (github-hosted, namespace.so, BuildJet, self-hosted) aren't restored
+ * onto another provider's image where their compiled-in paths and libc
+ * versions don't match. GitHub-hosted images export `ImageOS`
+ * (e.g. "macos15", "ubuntu24"); other runners leave it unset and pool
+ * under "self-hosted".
+ */
+function getRunnerImageId(): string {
+  return process.env.ImageOS || 'self-hosted'
+}
+
 async function processCacheKeyTemplate(template: string): Promise<string> {
   // Get all available variables
   const version = core.getInput('version')
   const installArgs = core.getInput('install_args')
+  const bootstrap = core.getBooleanInput('bootstrap')
+  const bootstrapSkip = core.getInput('bootstrap_skip')
+  const bootstrapArgs = core.getInput('bootstrap_args')
   const cacheKeyPrefix = core.getInput('cache_key_prefix') || 'mise-v1'
   const miseEnv = process.env.MISE_ENV?.replace(/,/g, '-')
-  const platform = await getTarget()
+  const platform = `${await getTarget()}-${getRunnerImageId()}`
 
   // Calculate file hash
   const fileHash = await glob.hashFiles(MISE_CONFIG_FILE_PATTERNS.join('\n'))
@@ -511,6 +825,14 @@ async function processCacheKeyTemplate(template: string): Promise<string> {
     }
   }
 
+  let bootstrapHash = ''
+  if (bootstrap) {
+    bootstrapHash = crypto
+      .createHash('sha256')
+      .update([String(bootstrap), bootstrapSkip, bootstrapArgs].join('\0'))
+      .digest('hex')
+  }
+
   // Prepare base template data
   const baseTemplateData = {
     version,
@@ -518,7 +840,8 @@ async function processCacheKeyTemplate(template: string): Promise<string> {
     platform,
     file_hash: fileHash,
     mise_env: miseEnv,
-    install_args_hash: installArgsHash
+    install_args_hash: installArgsHash,
+    bootstrap_hash: bootstrapHash
   }
 
   // Calculate the default cache key by processing the default template

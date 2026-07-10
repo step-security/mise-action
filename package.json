@@ -1,8 +1,9 @@
 {
   "name": "mise-action",
   "description": "mise tool setup action",
-  "version": "4.0.1",
+  "version": "4.2.0",
   "author": "step-security",
+  "type": "module",
   "private": true,
   "repository": {
     "type": "git",
@@ -21,32 +22,40 @@
     "bundle": "npm run format:write && npm run package",
     "format:check": "prettier --check **/*.ts",
     "format:write": "prettier --write **/*.ts",
-    "lint": "npx eslint . && npm run format:check",
-    "package": "ncc build -s src/index.ts --license licenses.txt",
+    "lint": "eslint . && npm run format:check",
+    "package": "rimraf ./dist && rollup --config rollup.config.mjs",
     "package:watch": "npm run package -- --watch"
   },
   "license": "MIT",
   "dependencies": {
-    "@actions/cache": "^5.0.0",
-    "@actions/core": "^2.0.1",
-    "@actions/exec": "^1.1.1",
-    "@actions/glob": "^0.5.0",
+    "@actions/cache": "^6.0.0",
+    "@actions/core": "^3.0.0",
+    "@actions/exec": "^3.0.0",
+    "@actions/glob": "^0.7.0",
+    "@actions/io": "^3.0.0",
     "@types/handlebars": "^4.0.40",
-    "axios": "^1.9.0",
-    "handlebars": "^4.7.8"
+    "handlebars": "^4.7.8",
+    "axios": "^1.7.0"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.2.0",
-    "@eslint/js": "^9.15.0",
+    "@eslint/js": "^10.0.0",
+    "@rollup/plugin-commonjs": "^29.0.0",
+    "@rollup/plugin-json": "^6.1.0",
+    "@rollup/plugin-node-resolve": "^16.0.0",
+    "@rollup/plugin-typescript": "^12.0.0",
     "@types/eslint__js": "^8.42.3",
-    "@types/node": "^22.10.0",
-    "@vercel/ncc": "^0.38.3",
-    "eslint": "^9.15.0",
-    "globals": "^16.0.0",
-    "jest": "^29.7.0",
+    "@types/node": "^24",
+    "eslint": "^10.0.0",
+    "globals": "^17.0.0",
+    "husky": "^9.1.7",
+    "jest": "^30",
     "js-yaml": "^4.1.0",
     "prettier": "^3.4.1",
-    "typescript": "^5.7.2",
-    "typescript-eslint": "^8.16.0"
+    "rimraf": "^6.0.0",
+    "rollup": "^4.0.0",
+    "rollup-plugin-license": "^3.7.1",
+    "typescript": "^6.0.0",
+    "typescript-eslint": "^8.63.0"
   }
 }
