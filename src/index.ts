@@ -10,7 +10,7 @@ import * as path from 'path'
 import { spawn } from 'child_process'
 import { pipeline } from 'stream/promises'
 import * as Handlebars from 'handlebars'
-import { validateSubscription } from "./subscription-check.js";
+import { validateSubscription } from './subscription-check.js'
 
 // Configuration file patterns for cache key generation
 const MISE_CONFIG_FILE_PATTERNS = [
@@ -53,7 +53,7 @@ type DownloadTool = 'curl' | 'wget'
 let cachedDownloadTool: DownloadTool | undefined
 
 async function run(): Promise<void> {
-    await validateSubscription();
+  await validateSubscription()
   try {
     await setToolVersions()
     await setMiseToml()

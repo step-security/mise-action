@@ -24,9 +24,7 @@
     "format:write": "prettier --write **/*.ts",
     "lint": "eslint . && npm run format:check",
     "package": "rimraf ./dist && rollup --config rollup.config.mjs",
-    "package:watch": "npm run package -- --watch",
-    "version": "./scripts/version.sh",
-    "prepare": "husky"
+    "package:watch": "npm run package -- --watch"
   },
   "license": "MIT",
   "dependencies": {
@@ -58,11 +56,6 @@
     "rollup": "^4.0.0",
     "rollup-plugin-license": "^3.7.1",
     "typescript": "^6.0.0",
-    "typescript-eslint": "^8.16.0"
-  },
-  "aube": {
-    "allowBuilds": {
-      "unrs-resolver": false
-    }
+    "typescript-eslint": "^8.63.0"
   }
 }
