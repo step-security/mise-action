@@ -10,10 +10,10 @@
     "imported_at": "2026-07-10T07:18:33.739Z"
   },
   "last_attempt": {
-    "upstream_tag": "v4.1.0",
-    "status": "success",
-    "reason": "ok",
-    "at": "2026-07-10T07:18:33.739Z"
+    "upstream_tag": "v4.2.0",
+    "status": "failed",
+    "reason": "build_failed",
+    "at": "2026-07-10T07:18:38.242Z"
   },
   "tier": "A",
   "policy": {
