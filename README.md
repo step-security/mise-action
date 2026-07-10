@@ -1,6 +1,6 @@
-[![StepSecurity Maintained Action](https://raw.githubusercontent.com/step-security/maintained-actions-assets/main/assets/maintained-action-banner.png)](https://docs.stepsecurity.io/actions/stepsecurity-maintained-actions)
-
 # Example Workflow
+
+[![StepSecurity Maintained Action](https://raw.githubusercontent.com/step-security/maintained-actions-assets/main/assets/maintained-action-banner.png)](https://docs.stepsecurity.io/actions/stepsecurity-maintained-actions)
 
 ```yaml
 name: test
@@ -70,7 +70,7 @@ When using `cache_key`, you can use template variables to reference internal val
 Available template variables:
 - `{{version}}` - The mise version (from the `version` input)
 - `{{cache_key_prefix}}` - The cache key prefix (from `cache_key_prefix` input or default)
-- `{{platform}}` - The target platform (e.g., "linux-x64", "macos-arm64")
+- `{{platform}}` - The target platform, including the runner image (e.g., "linux-x64-ubuntu24", "macos-arm64-macos15", "linux-x64-self-hosted"). The trailing segment is `process.env.ImageOS` on github-hosted runners and falls back to `"self-hosted"` elsewhere — preventing cache collisions when the same repo runs on different runner providers (github-hosted, namespace.so, self-hosted).
 - `{{file_hash}}` - Hash of all mise configuration files
 - `{{mise_env}}` - The MISE_ENV environment variable value
 - `{{install_args_hash}}` - SHA256 hash of the sorted tools from install args
@@ -108,3 +108,28 @@ When installing tools hosted on GitHub (like `gh`, `node`, `bun`, etc.), mise ne
 ```
 
 **Note:** The action automatically uses `${{ github.token }}` as the default, so in most cases you don't need to explicitly provide it. However, if you encounter rate limit errors, make sure the token is being passed correctly.
+
+## Lock Files
+
+If a repo mise lock file such as `mise.lock` is present in the working
+directory or one of its parents, this action automatically runs
+`mise install --locked`. You can still pass `install_args`; `--locked`
+will be added automatically unless you already included it yourself.
+
+This auto-detection is intended for repo-managed config files. If you provide
+`mise_toml` or `tool_versions` inputs, the action does not automatically force
+locked mode.
+
+## Alternative Installation
+
+Alternatively, mise is easy to use in GitHub Actions even without this:
+
+```yaml
+jobs:
+  build:
+    steps:
+    - run: |
+        curl https://mise.run | sh
+        echo "$HOME/.local/share/mise/bin" >> $GITHUB_PATH
+        echo "$HOME/.local/share/mise/shims" >> $GITHUB_PATH
+```

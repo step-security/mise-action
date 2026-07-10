@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "mode": "derivative",
+  "upstream": "jdx/mise-action",
+  "release_version_type": "vx.x.x",
+  "action_type": "node",
+  "vendor_series_version": "2026.06.1",
+  "last_success": {
+    "upstream_tag": "v4.0.1",
+    "imported_at": "2026-07-10T06:36:25.114Z"
+  },
+  "last_attempt": {
+    "upstream_tag": "v4.1.0",
+    "status": "failed",
+    "reason": "build_failed",
+    "at": "2026-07-10T06:37:43.929Z"
+  },
+  "tier": "A",
+  "policy": {
+    "stepwise_imports": true,
+    "skip_dist_from_upstream": true
+  }
+}

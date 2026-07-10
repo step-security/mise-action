@@ -2,10 +2,13 @@ name: Test Redacted Environment Variables
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
   pull_request:
-    branches: [main]
+    branches: [ main ]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test-redacted-env:
@@ -16,8 +19,9 @@ jobs:
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
-
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Create test mise config with sensitive values
         run: |
@@ -28,40 +32,40 @@ jobs:
           SECRET_TOKEN = {value = "supersecret-token-xyz", redact = true}
           DATABASE_PASSWORD = {value = "db-pass-789", redact = true}
           EOF
-      
+
       - name: Setup mise
         uses: ./
 
       - name: Verify environment variables are exported
         run: |
           echo "Checking if environment variables are set..."
-          
+
           # Check that public var is set
           if [ "$PUBLIC_VAR" != "this-is-public" ]; then
             echo "ERROR: PUBLIC_VAR not set correctly"
             exit 1
           fi
           echo "✓ PUBLIC_VAR is set correctly"
-          
+
           # Check that sensitive vars are set (but their values should be masked in logs)
           if [ -z "$API_KEY" ]; then
             echo "ERROR: API_KEY not set"
             exit 1
           fi
           echo "✓ API_KEY is set"
-          
+
           if [ -z "$SECRET_TOKEN" ]; then
             echo "ERROR: SECRET_TOKEN not set"
             exit 1
           fi
           echo "✓ SECRET_TOKEN is set"
-          
+
           if [ -z "$DATABASE_PASSWORD" ]; then
             echo "ERROR: DATABASE_PASSWORD not set"
             exit 1
           fi
           echo "✓ DATABASE_PASSWORD is set"
-      
+
       - name: Test that sensitive values are masked (will show *** if properly masked)
         run: |
           echo "Testing value masking..."
@@ -69,9 +73,9 @@ jobs:
           echo "SECRET_TOKEN value: $SECRET_TOKEN"
           echo "DATABASE_PASSWORD value: $DATABASE_PASSWORD"
           echo "PUBLIC_VAR value: $PUBLIC_VAR"
-          
+
           # This should show the actual values in the step output,
           # but GitHub Actions should mask them if core.setSecret was called
-      
+
       - name: Verify mise version
         run: mise --version
