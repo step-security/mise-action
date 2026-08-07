@@ -35,6 +35,8 @@ jobs:
             shellcheck = "0.11.0"
           working_directory: app # [default: .] directory to run mise in
           reshim: false # [default: false] run `mise reshim -f`
+          env: true # [default: true] export mise environment variables
+          export_path: true # [default: true] add mise PATH entries to subsequent steps
           github_token: ${{ secrets.GITHUB_TOKEN }} # [default: ${{ github.token }}] GitHub token for API authentication
       - run: shellcheck scripts/*.sh
   test:
@@ -46,6 +48,12 @@ jobs:
       - run: node ./my_app.js
 ```
 
+The action exports environment variables and PATH entries configured by mise
+to subsequent workflow steps. PATH entries are added individually through
+`GITHUB_PATH`, so the runner's complete PATH is not copied into `GITHUB_ENV`.
+Set `export_path: false` to export regular environment variables without
+persisting mise's PATH changes.
+
 ## Cache Configuration
 
 You can customize the cache key used by the action:
@@ -54,7 +62,7 @@ You can customize the cache key used by the action:
 - uses: step-security/mise-action@v4
   with:
     cache_key: "my-custom-cache-key"  # Override the entire cache key
-    cache_key_prefix: "mise-v1"       # Or just change the prefix (default: "mise-v0")
+    cache_key_prefix: "mise-cache-v1"       # Or just change the prefix (default: "mise-v1")
 ```
 
 ### Template Variables in Cache Keys
