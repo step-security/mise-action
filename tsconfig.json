@@ -15,7 +15,8 @@
     "skipLibCheck": true,
     "newLine": "lf",
     "isolatedModules": true,
-    "allowSyntheticDefaultImports": true
+    "allowSyntheticDefaultImports": true,
+    "types": ["node"]
   },
   "exclude": ["./dist", "./node_modules", "./__tests__", "./coverage"]
 }

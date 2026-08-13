@@ -1,7 +1,7 @@
 {
   "name": "mise-action",
   "description": "mise tool setup action",
-  "version": "4.2.0",
+  "version": "4.2.4",
   "author": "step-security",
   "type": "module",
   "private": true,
@@ -34,11 +34,11 @@
     "@actions/glob": "^0.7.0",
     "@actions/io": "^3.0.0",
     "@types/handlebars": "^4.0.40",
-    "handlebars": "^4.7.8",
-    "axios": "^1.7.0"
+    "axios": "^1.7.0",
+    "handlebars": "^4.7.8"
   },
   "devDependencies": {
-    "@eslint/eslintrc": "^3.2.0",
+    "@eslint/eslintrc": "^3.3.6",
     "@eslint/js": "^10.0.0",
     "@rollup/plugin-commonjs": "^29.0.0",
     "@rollup/plugin-json": "^6.1.0",
@@ -50,7 +50,7 @@
     "globals": "^17.0.0",
     "husky": "^9.1.7",
     "jest": "^30",
-    "js-yaml": "^4.1.0",
+    "js-yaml": "^5.0.0",
     "prettier": "^3.4.1",
     "rimraf": "^6.0.0",
     "rollup": "^4.0.0",
