@@ -90,7 +90,7 @@ THE SOFTWARE.
 ---
 
 Name: undici
-Version: 6.28.0
+Version: 6.29.0
 License: MIT
 Private: false
 Description: An HTTP/1.1 client, written from scratch for Node.js
@@ -233,7 +233,7 @@ SOFTWARE.
 ---
 
 Name: brace-expansion
-Version: 1.1.18
+Version: 1.1.21
 License: MIT
 Private: false
 Description: Brace expansion as known from sh/bash
@@ -1756,7 +1756,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ---
 
 Name: axios
-Version: 1.18.1
+Version: 1.20.0
 License: MIT
 Private: false
 Description: Promise based HTTP client for the browser and node.js
