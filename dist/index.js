@@ -118412,6 +118412,161 @@ async function validateSubscription() {
     }
 }
 
+/**
+ * Decide which key (if any) to save the mise cache under after a restore.
+ *
+ * A miss saves under the primary key. A prefix-matched restore (`restoredKey`
+ * differs from `primaryKey`) also saves, so the exact key gets populated. An
+ * exact hit already exists and needs no save.
+ */
+function cacheKeyToSave(primaryKey, restoredKey) {
+    return restoredKey === primaryKey ? undefined : primaryKey;
+}
+
+/** Authenticate this action; persist a token only when explicitly requested. */
+function setupGitHubToken() {
+    const githubToken = getInput('github_token');
+    const actionToken = process.env.MISE_GITHUB_TOKEN || githubToken;
+    const persist = getInput('persist_github_token');
+    const persistedToken = /^true$/i.test(persist)
+        ? actionToken
+        : !persist || /^false$/i.test(persist)
+            ? ''
+            : persist;
+    if (actionToken) {
+        setSecret(actionToken);
+        // Children inherit this, but later workflow steps do not.
+        process.env.MISE_GITHUB_TOKEN = actionToken;
+    }
+    else {
+        warning('No MISE_GITHUB_TOKEN provided. You may hit GitHub API rate limits when installing tools from GitHub.');
+    }
+    if (persistedToken) {
+        setSecret(persistedToken);
+        info('Persisting MISE_GITHUB_TOKEN for subsequent steps');
+        const previousToken = process.env.MISE_GITHUB_TOKEN;
+        try {
+            exportVariable('MISE_GITHUB_TOKEN', persistedToken);
+        }
+        finally {
+            // exportVariable also changes this process. Keep using the action's
+            // credential when a different token was supplied for later steps.
+            if (previousToken === undefined)
+                delete process.env.MISE_GITHUB_TOKEN;
+            else
+                process.env.MISE_GITHUB_TOKEN = previousToken;
+        }
+    }
+}
+
+/**
+ * Parse the `plugins` input: one plugin per line, either `name` or
+ * `name url`. Blank lines and `#` comments are ignored.
+ */
+function parsePlugins(input) {
+    const plugins = [];
+    for (const raw of input.split(/\r?\n/)) {
+        const line = raw.replace(/(^|\s)#.*/, '').trim();
+        if (!line)
+            continue;
+        const parts = line.split(/\s+/);
+        if (parts.length > 2) {
+            throw new Error(`Invalid plugins entry "${line}": expected "name" or "name url"`);
+        }
+        const [name, url] = parts;
+        if (name.startsWith('-') || (url !== undefined && url.startsWith('-'))) {
+            throw new Error(`Invalid plugins entry "${line}"`);
+        }
+        const existing = plugins.find(plugin => plugin.name === name);
+        if (existing) {
+            // The same entry twice is harmless. Different sources for one name are
+            // ambiguous: only the first would be installed, and the cache key must
+            // not depend on their order.
+            if (existing.url !== url) {
+                throw new Error(`Conflicting plugins entries for "${name}": a plugin can only have one source`);
+            }
+            continue;
+        }
+        plugins.push(url === undefined ? { name } : { name, url });
+    }
+    return plugins;
+}
+
+/** Select the highest eligible mise calendar version from the published index. */
+function selectMiseRelease(index, cutoff) {
+    if (!Number.isFinite(cutoff.getTime())) {
+        throw new Error('Invalid minimum release age cutoff');
+    }
+    let selected;
+    let selectedKey;
+    for (const line of index.split(/\r?\n/)) {
+        if (!line.trim())
+            continue;
+        const match = /^v(\d+\.\d+\.\d+)\t(\d+)$/.exec(line);
+        if (!match)
+            throw new Error('Invalid mise release index row');
+        const version = match[1];
+        const key = version.split('.').map(Number);
+        const publishedAt = Number(match[2]);
+        if (!key.every(Number.isSafeInteger) ||
+            !Number.isSafeInteger(publishedAt) ||
+            !Number.isFinite(new Date(publishedAt * 1000).getTime())) {
+            throw new Error('Invalid mise release index row');
+        }
+        if (publishedAt * 1000 > cutoff.getTime())
+            continue;
+        // This comparator is only for mise's numeric calendar versions, not tools.
+        const previousKey = selectedKey;
+        const difference = previousKey
+            ? key.map((part, i) => part - previousKey[i]).find(part => part !== 0) ||
+                0
+            : 1;
+        if (difference > 0) {
+            selected = { version, publishedAt };
+            selectedKey = key;
+        }
+    }
+    return selected;
+}
+
+// Outputs that already mean something else, and so can't be a tool's name.
+const RESERVED_OUTPUTS = new Set(['cache-hit', 'versions']);
+// Only names a workflow can reference as `steps.<id>.outputs.<name>`.
+const OUTPUT_NAME = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+/** Turn `mise ls --json --current` output into action outputs. */
+function toolVersionOutputs(ls) {
+    const result = { versions: {}, outputs: {} };
+    if (!ls || typeof ls !== 'object' || Array.isArray(ls))
+        return result;
+    for (const [tool, entries] of Object.entries(ls)) {
+        if (!Array.isArray(entries))
+            continue;
+        const active = [];
+        for (const entry of entries) {
+            if (!entry ||
+                typeof entry !== 'object' ||
+                entry.active === false ||
+                entry.installed === false ||
+                typeof entry.version !== 'string') {
+                continue;
+            }
+            active.push({
+                version: entry.version,
+                requested_version: entry.requested_version ?? undefined,
+                install_path: entry.install_path ?? undefined,
+                source: entry.source ?? undefined
+            });
+        }
+        if (active.length === 0)
+            continue;
+        result.versions[tool] = active;
+        if (OUTPUT_NAME.test(tool) && !RESERVED_OUTPUTS.has(tool)) {
+            result.outputs[tool] = active[0].version;
+        }
+    }
+    return result;
+}
+
 // Configuration file patterns for cache key generation
 const MISE_CONFIG_FILE_PATTERNS = [
     `**/.config/mise/config.toml`,
@@ -118441,7 +118596,7 @@ const MISE_CONFIG_FILE_PATTERNS = [
     `**/.tool-versions`
 ];
 // Default cache key template
-const DEFAULT_CACHE_KEY_TEMPLATE = '{{cache_key_prefix}}-{{platform}}{{#if version}}-{{version}}{{/if}}{{#if mise_env}}-{{mise_env}}{{/if}}{{#if install_args_hash}}-{{install_args_hash}}{{/if}}{{#if bootstrap_hash}}-{{bootstrap_hash}}{{/if}}-{{#if file_hash}}{{file_hash}}{{else}}no-config{{/if}}';
+const DEFAULT_CACHE_KEY_TEMPLATE = '{{cache_key_prefix}}-{{platform}}{{#if version}}-{{version}}{{/if}}{{#if mise_env}}-{{mise_env}}{{/if}}{{#if install_args_hash}}-{{install_args_hash}}{{/if}}{{#if bootstrap_hash}}-{{bootstrap_hash}}{{/if}}{{#if plugins_hash}}-{{plugins_hash}}{{/if}}-{{#if file_hash}}{{file_hash}}{{else}}no-config{{/if}}';
 const ROOT_MISE_LOCK_FILE_PATTERNS = [/^\.?mise(?:\.[^.]+)?\.lock$/];
 const CONFIG_DIR_MISE_LOCK_FILE_PATTERNS = [/^mise(?:\.[^.]+)?\.lock$/];
 const CONFIG_MISE_LOCK_FILE_PATTERNS = [/^config(?:\.[^.]+)?\.lock$/];
@@ -118450,6 +118605,12 @@ const MISE_MINISIGN_STARTED_AT = { year: 2024, month: 12, patch: 24 };
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 const verifiedShasums = new Map();
 let cachedDownloadTool;
+const DOWNLOAD_RETRIES = 5;
+const DOWNLOAD_RETRY_DELAY_MS = 2000;
+class NonRetryableError extends Error {
+}
+class MiseIntegrityMismatchError extends Error {
+}
 async function run() {
     await validateSubscription();
     try {
@@ -118481,13 +118642,16 @@ async function run() {
         // comment as overstating what the early call accelerates.
         setupWings();
         const version = getInput('version');
+        const minimumReleaseAge = getInput('minimum_release_age');
+        const autoUpdate = getBooleanInput('auto_update');
         const fetchFromGitHub = getBooleanInput('fetch_from_github');
-        await setupMise(version, fetchFromGitHub);
+        await setupMise(version, fetchFromGitHub, minimumReleaseAge, autoUpdate);
         await setEnvVars();
         if (getBooleanInput('reshim')) {
             await miseReshim();
         }
         await testMise();
+        await miseInstallPlugins();
         if (getBooleanInput('install')) {
             if (getBooleanInput('bootstrap')) {
                 await miseBootstrap();
@@ -118495,10 +118659,19 @@ async function run() {
             else {
                 await miseInstall();
             }
-            if (cacheKey && getBooleanInput('cache_save'))
-                await saveCache(cacheKey);
+            if (cacheKey && getBooleanInput('cache_save')) {
+                if (getBooleanInput('cache_save_post')) {
+                    // Defer to the post step so tools installed by later steps (e.g.
+                    // monorepo sub-project or task-level tools) are included.
+                    saveState('SAVE_CACHE_KEY', cacheKey);
+                }
+                else {
+                    await saveCache(cacheKey);
+                }
+            }
         }
         await miseLs();
+        await setToolVersionOutputs();
         const loadEnv = getBooleanInput('env');
         if (loadEnv) {
             await exportMiseEnv();
@@ -118690,8 +118863,10 @@ function checkMiseSupportsRedacted() {
     }
     return false;
 }
+/** Set mise defaults, action authentication, and the optional shims path. */
 async function setEnvVars() {
     startGroup('Setting env vars');
+    /** Export a default only when the caller has not already set it. */
     const set = (k, v) => {
         if (!process.env[k]) {
             info(`Setting ${k}=${v}`);
@@ -118705,14 +118880,7 @@ async function setEnvVars() {
     const logLevel = getInput('log_level');
     if (logLevel)
         set('MISE_LOG_LEVEL', logLevel);
-    const githubToken = getInput('github_token');
-    if (githubToken) {
-        // Don't use GITHUB_TOKEN, use MISE_GITHUB_TOKEN instead to avoid downstream issues.
-        set('MISE_GITHUB_TOKEN', githubToken);
-    }
-    else {
-        warning('No MISE_GITHUB_TOKEN provided. You may hit GitHub API rate limits when installing tools from GitHub.');
-    }
+    setupGitHubToken();
     set('MISE_TRUSTED_CONFIG_PATHS', process.cwd());
     set('MISE_YES', '1');
     if (getBooleanInput('add_shims_to_path')) {
@@ -118733,34 +118901,103 @@ async function restoreMiseCache() {
     setOutput('cache-hit', Boolean(cacheKey));
     if (!cacheKey) {
         info(`mise cache not found for ${primaryKey}`);
-        return primaryKey;
     }
-    info(`mise cache restored from key: ${cacheKey}`);
+    else {
+        info(`mise cache restored from key: ${cacheKey}`);
+    }
+    return cacheKeyToSave(primaryKey, cacheKey);
 }
-async function setupMise(version, fetchFromGitHub = false) {
+async function setupMise(version, fetchFromGitHub = false, minimumReleaseAge = '', autoUpdate = false) {
     const miseBinDir = path$1.join(miseDir(), 'bin');
     const miseBinPath = path$1.join(miseBinDir, process.platform === 'win32' ? 'mise.exe' : 'mise');
     const miseShimPath = path$1.join(miseBinDir, 'mise-shim.exe');
-    let installedVersion;
-    if (!fs.existsSync(path$1.join(miseBinPath))) {
+    const useMinimumReleaseAge = !version && Boolean(minimumReleaseAge.trim());
+    if (version && minimumReleaseAge.trim()) {
+        info('`minimum_release_age` is ignored because an explicit mise version was provided');
+    }
+    if (useMinimumReleaseAge) {
+        // Validate even when a cached binary means no release is resolved.
+        minimumReleaseAgeCutoff(minimumReleaseAge);
+    }
+    const versionFile = path$1.join(miseBinDir, 'mise-version');
+    let resolvedVersion = cleanVersion(version);
+    const target = await getTarget();
+    const assetNameFor = (v) => `mise-v${v}-${target}${process.platform === 'win32' ? '.exe' : ''}`;
+    // `auto_update` opts back in to comparing against the latest release. The
+    // main cache is only saved on a miss, so the updated binary is cached on its
+    // own, keyed by version, to avoid downloading it again on every run.
+    // GitHub includes the path list in the cache version, so restore and save
+    // must use the identical list.
+    const binCachePaths = [
+        miseBinPath,
+        ...(process.platform === 'win32' ? [miseShimPath] : []),
+        versionFile
+    ];
+    let binCacheKey;
+    const useBinCache = async (v) => {
+        if (!getBooleanInput('cache'))
+            return;
+        binCacheKey = `mise-bin-v1-${target}-${getRunnerImageId()}-${v}`;
+        await restoreMiseBinCache(binCacheKey, binCachePaths);
+    };
+    if (!resolvedVersion && autoUpdate) {
+        resolvedVersion = cleanVersion(await latestMiseVersion(useMinimumReleaseAge ? minimumReleaseAge : undefined));
+        await useBinCache(resolvedVersion);
+    }
+    let needsInstall = !fs.existsSync(miseBinPath);
+    if (!needsInstall) {
+        // With `version` unset, a cached mise is kept until the cache is busted
+        // rather than chasing every release, so verify it against its own
+        // version's signed checksums instead of the latest release's.
+        // The cached binary is never executed before it is verified. Its version
+        // comes from a record written at install time; a tampered record can only
+        // make the check fail, since the checksum must match that version's signed
+        // release. Caches without a record (saved by older releases) are verified
+        // against the latest release. The main cache can't be re-saved after an
+        // exact hit, so the binary goes through the version-keyed binary cache;
+        // otherwise such a cache would reinstall mise on every run once a newer
+        // release exists.
+        let existingVersion = resolvedVersion || readRecordedMiseVersion(versionFile);
+        if (!existingVersion) {
+            existingVersion = resolvedVersion = cleanVersion(await latestMiseVersion(useMinimumReleaseAge ? minimumReleaseAge : undefined));
+            await useBinCache(existingVersion);
+        }
+        if (!needsInstall) {
+            try {
+                await verifyExistingMiseAsset(miseBinPath, existingVersion, assetNameFor(existingVersion));
+                info(`Verified existing mise@${existingVersion}`);
+                resolvedVersion = existingVersion;
+            }
+            catch (err) {
+                if (!(err instanceof MiseIntegrityMismatchError))
+                    throw err;
+                warning(`Existing mise failed integrity verification (${errorMessage(err)}); reinstalling`);
+                await fs.promises.rm(miseBinPath, { force: true });
+                needsInstall = true;
+            }
+        }
+    }
+    if (needsInstall && !resolvedVersion) {
+        resolvedVersion = cleanVersion(await latestMiseVersion(useMinimumReleaseAge ? minimumReleaseAge : undefined));
+    }
+    const rawAssetName = assetNameFor(resolvedVersion);
+    const installedVersion = resolvedVersion;
+    if (needsInstall) {
         startGroup(version ? `Download mise@${version}` : 'Setup mise');
         await fs.promises.mkdir(miseBinDir, { recursive: true });
         const ext = process.platform === 'win32'
             ? '.zip'
-            : version && version.startsWith('2024')
+            : resolvedVersion.startsWith('2024')
                 ? ''
                 : (await tarSupportsZstd())
                     ? '.tar.zst'
                     : '.tar.gz';
-        let resolvedVersion = version || (await latestMiseVersion());
-        resolvedVersion = resolvedVersion.replace(/^v/, '');
-        const target = await getTarget();
         const assetName = `mise-v${resolvedVersion}-${target}${ext}`;
-        const rawAssetName = `mise-v${resolvedVersion}-${target}${process.platform === 'win32' ? '.exe' : ''}`;
-        const fetchFromCdn = !fetchFromGitHub && !version;
+        // The CDN only exposes the newest binary. An age-filtered release must be
+        // downloaded by its exact version from GitHub.
+        const fetchFromCdn = !fetchFromGitHub && !version && !useMinimumReleaseAge;
         const githubUrl = `https://github.com/jdx/mise/releases/download/v${resolvedVersion}/${assetName}`;
         const cdnUrl = `https://mise.jdx.dev/mise-latest-${target}${process.platform === 'win32' ? '.exe' : ''}`;
-        installedVersion = resolvedVersion;
         const installFromUrl = async (downloadUrl, downloadAssetName, checksumAssetName, extractArchive) => {
             await withDownloadedMiseAsset(downloadUrl, resolvedVersion, downloadAssetName, checksumAssetName, async (downloadPath, tempDir) => {
                 if (!extractArchive) {
@@ -118805,22 +119042,10 @@ async function setupMise(version, fetchFromGitHub = false) {
             await installFromUrl(githubUrl, assetName, assetName, true);
         }
     }
-    else {
-        const requestedVersion = cleanVersion(getInput('version'));
-        if (requestedVersion !== '') {
-            installedVersion = await getInstalledMiseVersion(miseBinPath);
-            if (requestedVersion === installedVersion) {
-                info(`mise already installed`);
-            }
-            else {
-                info(`mise already installed (${installedVersion}), but different version requested (${requestedVersion})`);
-                await exec(miseBinPath, ['self-update', requestedVersion, '-y']);
-                info(`mise updated to version ${requestedVersion}`);
-                installedVersion = requestedVersion;
-            }
-        }
-    }
     await ensureWindowsMiseShim(miseBinPath, miseShimPath, installedVersion);
+    if (needsInstall) {
+        await fs.promises.writeFile(versionFile, installedVersion);
+    }
     // compare with provided hash
     const want = getInput('sha256');
     if (want) {
@@ -118831,11 +119056,60 @@ async function setupMise(version, fetchFromGitHub = false) {
             throw new Error(`SHA256 mismatch: expected ${want}, got ${got} for ${miseBinPath}`);
         }
     }
+    if (needsInstall && binCacheKey && getBooleanInput('cache_save')) {
+        await saveMiseBinCache(binCacheKey, binCachePaths);
+    }
     addPath(miseBinDir);
+}
+function readRecordedMiseVersion(versionFile) {
+    try {
+        const recorded = cleanVersion(fs.readFileSync(versionFile, 'utf8').trim());
+        return /^[0-9A-Za-z][0-9A-Za-z._+-]*$/.test(recorded) ? recorded : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
+async function restoreMiseBinCache(key, paths) {
+    try {
+        if (await restoreCache(paths, key)) {
+            info(`mise binary restored from key: ${key}`);
+        }
+    }
+    catch (err) {
+        warning(`Failed to restore mise binary cache: ${errorMessage(err)}`);
+    }
+}
+async function saveMiseBinCache(key, paths) {
+    try {
+        await saveCache$1(paths, key);
+        info(`mise binary cached with key: ${key}`);
+    }
+    catch (err) {
+        warning(`Failed to save mise binary cache: ${errorMessage(err)}`);
+    }
 }
 async function withExtractedZip(archivePath, tempDir, fn) {
     const extractDir = path$1.join(tempDir, 'extract');
-    await exec('unzip', [archivePath, '-d', extractDir]);
+    // Windows PowerShell ships with every Windows runner, unlike `unzip`, which
+    // is missing on many self-hosted ones. Paths go through the environment to
+    // avoid quoting issues.
+    await exec('powershell', [
+        '-NoProfile',
+        '-NonInteractive',
+        // Process-scoped; a Restricted default policy (fresh Windows client
+        // installs) can otherwise block loading the Archive module.
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        'Expand-Archive -LiteralPath $env:MISE_ZIP_ARCHIVE -DestinationPath $env:MISE_ZIP_DEST -Force'
+    ], {
+        env: {
+            ...process.env,
+            MISE_ZIP_ARCHIVE: archivePath,
+            MISE_ZIP_DEST: extractDir
+        }
+    });
     await fn(extractDir);
 }
 async function installWindowsMiseShim(extractedMiseBinDir, miseShimPath) {
@@ -118883,30 +119157,47 @@ async function getDownloadTool() {
     info(`Using ${cachedDownloadTool} to download mise`);
     return cachedDownloadTool;
 }
+async function retryDownload(fn) {
+    for (let retry = 0;; retry++) {
+        try {
+            return await fn();
+        }
+        catch (err) {
+            if (err instanceof NonRetryableError || retry === DOWNLOAD_RETRIES)
+                throw err;
+            warning(`Download failed: ${errorMessage(err)}. Retrying in ${DOWNLOAD_RETRY_DELAY_MS / 1000} seconds (${retry + 1}/${DOWNLOAD_RETRIES}).`);
+            await new Promise(resolve => setTimeout(resolve, DOWNLOAD_RETRY_DELAY_MS));
+        }
+    }
+}
 async function downloadToFile(url, filePath) {
     const tool = await getDownloadTool();
-    if (tool === 'curl') {
-        await exec('curl', ['-fsSL', url, '--output', filePath]);
-    }
-    else {
-        await exec('wget', ['-qO', filePath, url]);
-    }
+    await retryDownload(async () => {
+        if (tool === 'curl') {
+            await exec('curl', ['-fsSL', url, '--output', filePath]);
+        }
+        else {
+            await exec('wget', ['-qO', filePath, url]);
+        }
+    });
 }
 async function downloadText(url) {
     return (await downloadRawText(url)).trim();
 }
 async function downloadRawText(url) {
     const tool = await getDownloadTool();
-    if (tool === 'curl') {
-        const rsp = await getExecOutput('curl', ['-fsSL', url], {
+    return retryDownload(async () => {
+        if (tool === 'curl') {
+            const rsp = await getExecOutput('curl', ['-fsSL', url], {
+                silent: true
+            });
+            return rsp.stdout;
+        }
+        const rsp = await getExecOutput('wget', ['-qO-', url], {
             silent: true
         });
         return rsp.stdout;
-    }
-    const rsp = await getExecOutput('wget', ['-qO-', url], {
-        silent: true
     });
-    return rsp.stdout;
 }
 async function withDownloadedMiseAsset(url, version, assetName, verifyAssetName, fn) {
     const tempDir = await fs.promises.mkdtemp(path$1.join(os.tmpdir(), 'mise-action-'));
@@ -118936,6 +119227,45 @@ async function verifyDownloadedMiseAsset(filePath, version, assetName) {
         throw new Error(`SHA256 mismatch: expected ${want}, got ${got} for ${assetName}`);
     }
     info(`Verified ${assetName} against signed checksums`);
+}
+async function verifyExistingMiseAsset(filePath, version, assetName) {
+    const got = await sha256File(filePath);
+    const explicitChecksum = getInput('sha256');
+    if (explicitChecksum) {
+        if (got !== explicitChecksum) {
+            throw new MiseIntegrityMismatchError(`SHA256 mismatch: expected ${explicitChecksum}, got ${got} for ${filePath}`);
+        }
+        await verifyExistingMiseVersion(filePath, version);
+        info(`Verified existing mise against configured SHA256`);
+        return;
+    }
+    const shasums = await verifiedMiseShasums(version);
+    if (!shasums) {
+        throw new MiseIntegrityMismatchError(`Cannot verify existing mise ${version} without signed checksums`);
+    }
+    let want;
+    try {
+        want = checksumForAsset(shasums, assetName);
+    }
+    catch (err) {
+        throw new MiseIntegrityMismatchError(`Cannot verify existing mise ${version}: ${errorMessage(err)}`);
+    }
+    if (got !== want) {
+        throw new MiseIntegrityMismatchError(`SHA256 mismatch: expected ${want}, got ${got} for ${assetName}`);
+    }
+    info(`Verified existing ${assetName} against signed checksums`);
+}
+async function verifyExistingMiseVersion(filePath, expectedVersion) {
+    let actualVersion;
+    try {
+        actualVersion = await getInstalledMiseVersion(filePath);
+    }
+    catch (err) {
+        throw new MiseIntegrityMismatchError(`Could not determine the version of existing mise: ${errorMessage(err)}`);
+    }
+    if (actualVersion !== expectedVersion) {
+        throw new MiseIntegrityMismatchError(`Existing mise version ${actualVersion} does not match requested version ${expectedVersion}`);
+    }
 }
 async function verifiedMiseShasums(version) {
     const cached = verifiedShasums.get(version);
@@ -119028,9 +119358,13 @@ async function installFromTarFile(archivePath, tarArgs, tempDir, miseBinPath) {
     await exec('mv', [extractedMisePath, miseBinPath]);
 }
 async function getInstalledMiseVersion(miseBinPath) {
-    const versionOutput = await getExecOutput(miseBinPath, ['version', '--json'], { silent: true });
-    const versionJson = JSON.parse(versionOutput.stdout);
-    return cleanVersion(versionJson.version.split(' ')[0]);
+    const versionOutput = await getExecOutput(miseBinPath, ['version'], {
+        silent: true
+    });
+    const version = versionOutput.stdout.trim().split(/\s+/)[0];
+    if (!version)
+        throw new Error('mise did not report a version');
+    return cleanVersion(version);
 }
 function errorMessage(err) {
     return err instanceof Error ? err.message : String(err);
@@ -119045,8 +119379,116 @@ async function tarSupportsZstd() {
         return false;
     }
 }
-async function latestMiseVersion() {
-    return downloadText('https://mise.jdx.dev/VERSION');
+function subtractUtcMonths(date, months) {
+    const day = date.getUTCDate();
+    date.setUTCDate(1);
+    date.setUTCMonth(date.getUTCMonth() - months);
+    const lastDay = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)).getUTCDate();
+    date.setUTCDate(Math.min(day, lastDay));
+}
+function hasValidIsoCalendarDate(input) {
+    const match = input.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (!match)
+        return false;
+    const [, yearText, monthText, dayText] = match;
+    const year = Number(yearText);
+    const month = Number(monthText);
+    const day = Number(dayText);
+    const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    const daysInMonth = [
+        31,
+        leapYear ? 29 : 28,
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31
+    ];
+    return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth[month - 1];
+}
+function minimumReleaseAgeCutoff(value, now = new Date()) {
+    const input = value.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(input) && hasValidIsoCalendarDate(input)) {
+        const cutoff = new Date(`${input}T23:59:59Z`);
+        if (!Number.isNaN(cutoff.getTime()))
+            return cutoff;
+    }
+    if (/^\d{4}-\d{2}-\d{2}T/.test(input) && hasValidIsoCalendarDate(input)) {
+        const cutoff = new Date(input);
+        if (!Number.isNaN(cutoff.getTime()))
+            return cutoff;
+    }
+    if (/^\d+$/.test(input)) {
+        return new Date(now.getTime() - Number(input) * 1000);
+    }
+    const duration = /(\d+)(mo|ms|us|ns|y|w|d|h|m|s)/gy;
+    let offset = 0;
+    let months = 0;
+    let milliseconds = 0;
+    for (let match = duration.exec(input); match; match = duration.exec(input)) {
+        if (match.index !== offset)
+            break;
+        offset = duration.lastIndex;
+        const amount = Number(match[1]);
+        switch (match[2]) {
+            case 'y':
+                months += amount * 12;
+                break;
+            case 'mo':
+                months += amount;
+                break;
+            case 'w':
+                milliseconds += amount * 7 * 24 * 60 * 60 * 1000;
+                break;
+            case 'd':
+                milliseconds += amount * 24 * 60 * 60 * 1000;
+                break;
+            case 'h':
+                milliseconds += amount * 60 * 60 * 1000;
+                break;
+            case 'm':
+                milliseconds += amount * 60 * 1000;
+                break;
+            case 's':
+                milliseconds += amount * 1000;
+                break;
+            case 'ms':
+                milliseconds += amount;
+                break;
+            case 'us':
+                milliseconds += amount / 1000;
+                break;
+            case 'ns':
+                milliseconds += amount / 1_000_000;
+                break;
+        }
+    }
+    if (!input || offset !== input.length) {
+        throw new Error(`Invalid minimum_release_age: ${value}. Expected a duration such as 24h, 7d, 6mo, or 1y, or an ISO date or timestamp.`);
+    }
+    const cutoff = new Date(now);
+    if (months)
+        subtractUtcMonths(cutoff, months);
+    cutoff.setTime(cutoff.getTime() - milliseconds);
+    return cutoff;
+}
+async function latestMiseVersion(minimumReleaseAge) {
+    if (!minimumReleaseAge) {
+        return downloadText('https://mise.jdx.dev/VERSION');
+    }
+    const cutoff = minimumReleaseAgeCutoff(minimumReleaseAge);
+    const index = await downloadText('https://mise.jdx.dev/releases.tsv');
+    const release = selectMiseRelease(index, cutoff);
+    if (!release) {
+        throw new Error(`No stable mise release satisfies minimum_release_age=${minimumReleaseAge}`);
+    }
+    info(`Selected mise ${release.version}, released ${new Date(release.publishedAt * 1000).toISOString()}, with minimum_release_age=${minimumReleaseAge}`);
+    return release.version;
 }
 async function setToolVersions() {
     const toolVersions = getInput('tool_versions');
@@ -119057,6 +119499,11 @@ async function setToolVersions() {
 async function setMiseToml() {
     const toml = getInput('mise_toml');
     if (toml) {
+        // mise loads `.mise.toml` ahead of `mise.toml` in the same directory, so
+        // a repo `.mise.toml` would silently win over this input.
+        if (fs.existsSync('.mise.toml')) {
+            warning('`.mise.toml` exists in the current directory and takes precedence over the `mise_toml` input, which is written to `mise.toml`. Rename it to `mise.toml` or remove it for `mise_toml` to take effect.');
+        }
         await writeFile('mise.toml', toml);
     }
 }
@@ -119097,6 +119544,33 @@ const miseBootstrap = async () => {
     return mise([command]);
 };
 const miseLs = async () => mise([`ls`]);
+/**
+ * Install the plugins from the `plugins` input before tools are installed, so
+ * tools and idiomatic version files that need them resolve. Installing a
+ * plugin that is already present (e.g. from the cache) only warns.
+ */
+async function miseInstallPlugins() {
+    for (const { name, url } of parsePlugins(getInput('plugins'))) {
+        await mise(['plugins', 'install', '-y', name, ...(url ? [url] : [])]);
+    }
+}
+/**
+ * Expose the active tool versions as outputs: `versions` (JSON) and one output
+ * per tool. A failure here only warns; it must not fail the job.
+ */
+async function setToolVersionOutputs() {
+    try {
+        const { stdout } = await getExecOutput('mise', ['ls', '--json', '--current'], { cwd: getCwd(), silent: true });
+        const { versions, outputs } = toolVersionOutputs(JSON.parse(stdout));
+        setOutput('versions', JSON.stringify(versions));
+        for (const [tool, version] of Object.entries(outputs)) {
+            setOutput(tool, version);
+        }
+    }
+    catch (err) {
+        warning(`Unable to set tool version outputs: ${errorMessage(err)}`);
+    }
+}
 const miseReshim = async () => mise([`reshim`, `-f`]);
 const mise = async (args) => await group(`Running mise ${args.join(' ')}`, async () => {
     const cwd = getCwd();
@@ -119118,7 +119592,26 @@ const writeFile = async (p, body) => await group(`Writing ${p}`, async () => {
     info(`Body:\n${body}`);
     await fs.promises.writeFile(p, body, { encoding: 'utf8' });
 });
-run();
+/** Post step: save the cache deferred by `cache_save_post`. */
+async function post() {
+    const cacheKey = getState('SAVE_CACHE_KEY');
+    if (!cacheKey)
+        return;
+    try {
+        await saveCache(cacheKey);
+    }
+    catch (err) {
+        // The job's work is done; a failed cache save should not fail it.
+        warning(`Failed to save mise cache: ${errorMessage(err)}`);
+    }
+}
+if (getState('IS_POST')) {
+    void post();
+}
+else {
+    saveState('IS_POST', 'true');
+    void run();
+}
 function getCwd() {
     return (getInput('working_directory') ||
         getInput('install_dir') ||
@@ -119259,6 +119752,17 @@ async function processCacheKeyTemplate(template) {
             installArgsHash = crypto$1.createHash('sha256').update(tools).digest('hex');
         }
     }
+    // Plugins are cached with the rest of mise's data and an installed plugin is
+    // left alone, so a changed plugin URL or ref has to change the key.
+    let pluginsHash = '';
+    const plugins = parsePlugins(getInput('plugins'));
+    if (plugins.length > 0) {
+        const normalized = plugins
+            .map(({ name, url }) => `${name} ${url ?? ''}`)
+            .sort()
+            .join('\n');
+        pluginsHash = crypto$1.createHash('sha256').update(normalized).digest('hex');
+    }
     let bootstrapHash = '';
     if (bootstrap) {
         bootstrapHash = crypto$1
@@ -119274,7 +119778,8 @@ async function processCacheKeyTemplate(template) {
         file_hash: fileHash,
         mise_env: miseEnv,
         install_args_hash: installArgsHash,
-        bootstrap_hash: bootstrapHash
+        bootstrap_hash: bootstrapHash,
+        plugins_hash: pluginsHash
     };
     // Calculate the default cache key by processing the default template
     const defaultTemplate = libExports.compile(DEFAULT_CACHE_KEY_TEMPLATE);
