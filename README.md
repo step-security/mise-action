@@ -14,8 +14,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: step-security/mise-action@v4
+      - uses: actions/checkout@v
+      - uses: step-security/mise-action@v5
         with:
           version: 2026.3.10 # [default: newest release at least 24h old] mise version to install
           # minimum_release_age: 7d # default: 24h; use 0s to disable the delay
@@ -44,8 +44,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: step-security/mise-action@v4
+      - uses: actions/checkout@v7
+      - uses: step-security/mise-action@v5
       # .tool-versions will be read from repo root
       - run: node ./my_app.js
 ```
@@ -65,7 +65,7 @@ By default, the action installs the newest stable mise release that is at least
 24 hours old. To change the delay, set `minimum_release_age` and omit `version`:
 
 ```yaml
-- uses: step-security/mise-action@v4
+- uses: step-security/mise-action@v5
   with:
     minimum_release_age: 7d
 ```
@@ -98,7 +98,7 @@ persisting mise's PATH changes.
 This avoids a separate `mise ls --json | jq` step, for example to key another cache on the resolved version:
 
 ```yaml
-- uses: step-security/mise-action@v4
+- uses: step-security/mise-action@v5
   id: mise
 - uses: actions/cache@v6
   with:
@@ -113,7 +113,7 @@ If a tool has several active versions, the per-tool output is the first one; use
 Some tools and idiomatic version files (such as `.yvmrc`) need a plugin. List them in the `plugins` input, one per line as `name` or `name url`, and the action installs them before running `mise install`:
 
 ```yaml
-- uses: step-security/mise-action@v4
+- uses: step-security/mise-action@v5
   env:
     # Idiomatic version files are opt-in per tool; this is needed for `.yvmrc`
     MISE_IDIOMATIC_VERSION_FILE_ENABLE_TOOLS: yarn
@@ -130,7 +130,7 @@ Plugins already present (for example restored from the cache) are left alone. If
 You can customize the cache key used by the action:
 
 ```yaml
-- uses: step-security/mise-action@v4
+- uses: step-security/mise-action@v5
   with:
     cache_key: "my-custom-cache-key"  # Override the entire cache key
     cache_key_prefix: "mise-cache-v1"       # Or just change the prefix (default: "mise-v1")
@@ -138,14 +138,14 @@ You can customize the cache key used by the action:
 
 ### Using Another Cache Action
 
-The built-in cache uses GitHub's cache. To store the cache elsewhere (for example with [runs-on/cache](https://github.com/runs-on/cache) and S3), turn the built-in cache off and cache the mise data directory yourself with any action that has the `actions/cache` interface:
+The built-in cache uses GitHub's cache. To store the cache elsewhere (for example with [step-security/runs-on-cache](https://github.com/step-security/runs-on-cache) and S3), turn the built-in cache off and cache the mise data directory yourself with any action that has the `actions/cache` interface:
 
 ```yaml
 - uses: step-security/runs-on-cache@v5
   with:
     path: ~/.local/share/mise
     key: mise-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/mise.toml', '**/.mise.toml', '**/mise.*.toml', '**/.mise.*.toml', '**/mise.lock', '**/.mise.lock', '**/mise.*.lock', '**/.tool-versions') }}
-- uses: step-security/mise-action@v4
+- uses: step-security/mise-action@v5
   with:
     cache: false
 ```
@@ -157,7 +157,7 @@ The path to cache is mise's data directory, `~/.local/share/mise` by default (`%
 When using `cache_key`, you can use template variables to reference internal values:
 
 ```yaml
-- uses: step-security/mise-action@v4
+- uses: step-security/mise-action@v5
   with:
     cache_key: "mise-{{platform}}-{{version}}-{{file_hash}}"
     version: "2026.3.10"
@@ -179,7 +179,7 @@ Conditional logic is also supported using Handlebars syntax like `{{#if version}
 
 Example using multiple variables:
 ```yaml
-- uses: step-security/mise-action@v4
+- uses: step-security/mise-action@v5
   with:
     cache_key: "mise-v1-{{platform}}-{{install_args_hash}}-{{file_hash}}"
     install_args: "node@24 python@3.14"
@@ -187,7 +187,7 @@ Example using multiple variables:
 
 You can also extend the default cache key:
 ```yaml
-- uses: step-security/mise-action@v4
+- uses: step-security/mise-action@v5
   with:
     cache_key: "{{default}}-custom-suffix"
     install_args: "node@24 python@3.14"
@@ -213,9 +213,7 @@ Two ways to deal with it:
 
    These are the Linux paths (macOS runners use `/Users/runner/...`). On Windows the action caches `%LOCALAPPDATA%\mise` by default, so on GitHub-hosted Windows runners use `C:\Users\runneradmin\AppData\Local\mise\rustup` and `C:\Users\runneradmin\AppData\Local\mise\cargo` (on other runners, the same paths under that runner's `%LOCALAPPDATA%`). If you customize `mise_dir`, `MISE_DATA_DIR`, or `XDG_DATA_HOME`, keep these paths under the same directory.
 
-2. Don't cache the toolchain through the action. Install Rust with `rustup` (or a dedicated action) and a Rust cache such as [Swatinem/rust-cache](https://github.com/Swatinem/rust-cache), and let mise manage everything else. For this to work, mise must no longer manage Rust: remove `rust` from `mise.toml` / `.tool-versions` (or keep it only in a config the CI job doesn't use, for example behind `MISE_ENV`), because the action runs `mise install` by default and would otherwise install Rust through mise and cache its install record again.
-
-See [jdx/mise-action#215](https://github.com/jdx/mise-action/issues/215) for the discussion.
+2. Don't cache the toolchain through the action. Install Rust with `rustup` (or a dedicated action) and a Rust cache such as [step-security/rust-cache](https://github.com/step-security/rust-cache), and let mise manage everything else. For this to work, mise must no longer manage Rust: remove `rust` from `mise.toml` / `.tool-versions` (or keep it only in a config the CI job doesn't use, for example behind `MISE_ENV`), because the action runs `mise install` by default and would otherwise install Rust through mise and cache its install record again.
 
 ## Matrix Builds
 
@@ -229,7 +227,7 @@ env:
   MISE_RUBY_VERSION: ${{ matrix.ruby-version }}
 steps:
   - uses: actions/checkout@v7
-  - uses: step-security/mise-action@v4
+  - uses: step-security/mise-action@v5
     with:
       cache_key: "{{default}}-ruby${{ matrix.ruby-version }}"
   - run: mise exec -- ruby --version
@@ -246,7 +244,7 @@ The `mise_toml` input is not a good fit for matrices: it writes a `mise.toml` in
 When installing tools hosted on GitHub (like `gh`, `node`, `bun`, etc.), mise needs to make API calls to GitHub's releases API. Without authentication, these calls are subject to GitHub's rate limit of 60 requests per hour, which can cause installation failures.
 
 ```yaml
-- uses: step-security/mise-action@v4
+- uses: step-security/mise-action@v5
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     # your other configuration
@@ -268,7 +266,7 @@ To authenticate later shims, `mise exec`, or lazy installs, set
 `persist_github_token: true` to export the action's token for subsequent steps:
 
 ```yaml
-- uses: step-security/mise-action@v4 # unreleased persistence support
+- uses: step-security/mise-action@v5 # unreleased persistence support
   with:
     persist_github_token: true
 ```
@@ -278,7 +276,7 @@ still authenticates its own tool installs with `github_token` (or an existing
 `MISE_GITHUB_TOKEN`); later steps receive the separate token:
 
 ```yaml
-- uses: step-security/mise-action@v4 # unreleased persistence support
+- uses: step-security/mise-action@v5 # unreleased persistence support
   with:
     persist_github_token: ${{ secrets.READ_ONLY_TOKEN }}
 ```
@@ -304,7 +302,7 @@ locked mode.
 Set `bootstrap: true` to run `mise bootstrap` instead of `mise install`:
 
 ```yaml
-- uses: step-security/mise-action@v4
+- uses: step-security/mise-action@v5
   with:
     bootstrap: true
 ```

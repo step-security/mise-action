@@ -5,10 +5,6 @@ tasks."lint:fix" = "npm run format:write"
 
 [tools]
 node = '24'
-<<<<<<< 466c2ed3fd0924039eb2e6119caa5877ee980b4a
-=======
-aube = { version = 'latest', minimum_release_age = '0s' }
->>>>>>> a146f04d8b634df734477c5e509e1b7e51549be6
 git-cliff = 'latest'
 gh = 'latest'
 communique = { version = 'latest', minimum_release_age = '0s' }

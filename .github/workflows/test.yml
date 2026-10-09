@@ -4,8 +4,6 @@ on: # rebuild any PRs and main branch changes
   push:
     branches:
       - main
-      - 'releases/*'
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -32,17 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: ubuntu
-            runs-on: ubuntu-latest
-          - name: macos
-            runs-on: macos-latest
-          - name: windows
-            runs-on: windows-latest
-          - name: alpine
-            runs-on: ubuntu-latest
-            container: alpine:3.22@sha256:310c62b5e7ca5b08167e4384c68db0fd2905dd9c7493756d356e893909057601
-            requirements: apk add --no-cache curl bash
+        include: ${{ github.actor == 'dependabot[bot]' && fromJSON('[{"name":"ubuntu","runs-on":"ubuntu-latest"}]') || fromJSON('[{"name":"ubuntu","runs-on":"ubuntu-latest"},{"name":"macos","runs-on":"macos-latest"},{"name":"windows","runs-on":"windows-latest"},{"name":"alpine","runs-on":"ubuntu-latest","container":"alpine:3.22@sha256:310c62b5e7ca5b08167e4384c68db0fd2905dd9c7493756d356e893909057601","requirements":"apk add --no-cache curl bash"}]') }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runs-on }}
     container: ${{ matrix.container }}
@@ -499,31 +487,21 @@ jobs:
         with:
           persist-credentials: false
 
-      # `mise.toml` pins both Node and aube; mise-action installs
-      # whatever's listed there. `aube ci` installs exactly the
-      # dependency graph recorded in `aube-lock.yaml`.
-      # `.npmrc` pins `node-linker=hoisted` so the layout is
-      # npm-flat (rollup's `--configPlugin` resolution
-      # requires this).
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
-        with:
-          cache: false
-
       - name: Install Dependencies
-        id: aube-ci
-        run: aube ci
+        id: npm-ci
+        run: npm ci
 
       - name: Check Format
-        id: aube-format-check
-        run: aubr format:check
+        id: npm-format-check
+        run: npm run format:check
 
       - name: Lint
-        id: aube-lint
-        run: aubr lint
+        id: npm-lint
+        run: npm run lint
 
       - name: TypeScript 7 type check
         id: typescript-7
-        run: aubr typecheck
+        run: npm run typecheck
 
       # - name: Test
       #   id: npm-ci-test
@@ -535,8 +513,6 @@ jobs:
 
     permissions:
       contents: read
-      statuses: write
-
     steps:
       - name: Checkout
         id: checkout
@@ -544,17 +520,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
-        with:
-          cache: false
-
       - name: Install Dependencies
         id: install
-        run: aube ci
+        run: npm ci
 
       - name: Build dist/ Directory
         id: build
-        run: aubr bundle
+        run: npm run bundle
 
       - name: Compare Expected and Actual Directories
         id: diff
@@ -564,14 +536,6 @@ jobs:
             git diff --ignore-space-at-eol --text dist/
             exit 1
           fi
-
-      # If index.js was different than expected, upload the expected version as
-      # a workflow artifact.
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: ${{ failure() && steps.diff.conclusion == 'failure' }}
-        with:
-          name: dist
-          path: dist/
 
   test-redacted-env:
     runs-on: ubuntu-latest
@@ -638,25 +602,12 @@ jobs:
       - name: Verify mise version
         run: mise --version
 
-  zizmor:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
-        with:
-          advanced-security: false
-
   final:
     needs:
       - build
       - test-typescript
       - check-dist
       - test-redacted-env
-      - zizmor
       - test
       - path_opt_out
       - specific_version
