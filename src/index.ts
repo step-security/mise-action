@@ -9,6 +9,11 @@ import * as os from 'os'
 import * as path from 'path'
 import * as Handlebars from 'handlebars'
 import { validateSubscription } from './subscription-check.js'
+import { cacheKeyToSave } from './cache-save.js'
+import { setupGitHubToken } from './github-token.js'
+import { parsePlugins } from './plugins.js'
+import { selectMiseRelease } from './release-index.js'
+import { toolVersionOutputs } from './tool-versions.js'
 
 // Configuration file patterns for cache key generation
 const MISE_CONFIG_FILE_PATTERNS = [
@@ -41,7 +46,7 @@ const MISE_CONFIG_FILE_PATTERNS = [
 
 // Default cache key template
 const DEFAULT_CACHE_KEY_TEMPLATE =
-  '{{cache_key_prefix}}-{{platform}}{{#if version}}-{{version}}{{/if}}{{#if mise_env}}-{{mise_env}}{{/if}}{{#if install_args_hash}}-{{install_args_hash}}{{/if}}{{#if bootstrap_hash}}-{{bootstrap_hash}}{{/if}}-{{#if file_hash}}{{file_hash}}{{else}}no-config{{/if}}'
+  '{{cache_key_prefix}}-{{platform}}{{#if version}}-{{version}}{{/if}}{{#if mise_env}}-{{mise_env}}{{/if}}{{#if install_args_hash}}-{{install_args_hash}}{{/if}}{{#if bootstrap_hash}}-{{bootstrap_hash}}{{/if}}{{#if plugins_hash}}-{{plugins_hash}}{{/if}}-{{#if file_hash}}{{file_hash}}{{else}}no-config{{/if}}'
 
 const ROOT_MISE_LOCK_FILE_PATTERNS = [/^\.?mise(?:\.[^.]+)?\.lock$/]
 const CONFIG_DIR_MISE_LOCK_FILE_PATTERNS = [/^mise(?:\.[^.]+)?\.lock$/]
@@ -54,6 +59,11 @@ const verifiedShasums = new Map<string, string>()
 
 type DownloadTool = 'curl' | 'wget'
 let cachedDownloadTool: DownloadTool | undefined
+const DOWNLOAD_RETRIES = 5
+const DOWNLOAD_RETRY_DELAY_MS = 2000
+
+class NonRetryableError extends Error {}
+class MiseIntegrityMismatchError extends Error {}
 
 async function run(): Promise<void> {
   await validateSubscription()
@@ -88,23 +98,34 @@ async function run(): Promise<void> {
     setupWings()
 
     const version = core.getInput('version')
+    const minimumReleaseAge = core.getInput('minimum_release_age')
+    const autoUpdate = core.getBooleanInput('auto_update')
     const fetchFromGitHub = core.getBooleanInput('fetch_from_github')
-    await setupMise(version, fetchFromGitHub)
+    await setupMise(version, fetchFromGitHub, minimumReleaseAge, autoUpdate)
     await setEnvVars()
     if (core.getBooleanInput('reshim')) {
       await miseReshim()
     }
     await testMise()
+    await miseInstallPlugins()
     if (core.getBooleanInput('install')) {
       if (core.getBooleanInput('bootstrap')) {
         await miseBootstrap()
       } else {
         await miseInstall()
       }
-      if (cacheKey && core.getBooleanInput('cache_save'))
-        await saveCache(cacheKey)
+      if (cacheKey && core.getBooleanInput('cache_save')) {
+        if (core.getBooleanInput('cache_save_post')) {
+          // Defer to the post step so tools installed by later steps (e.g.
+          // monorepo sub-project or task-level tools) are included.
+          core.saveState('SAVE_CACHE_KEY', cacheKey)
+        } else {
+          await saveCache(cacheKey)
+        }
+      }
     }
     await miseLs()
+    await setToolVersionOutputs()
     const loadEnv = core.getBooleanInput('env')
     if (loadEnv) {
       await exportMiseEnv()
@@ -329,8 +350,10 @@ function checkMiseSupportsRedacted(): boolean {
   return false
 }
 
+/** Set mise defaults, action authentication, and the optional shims path. */
 async function setEnvVars(): Promise<void> {
   core.startGroup('Setting env vars')
+  /** Export a default only when the caller has not already set it. */
   const set = (k: string, v: string): void => {
     if (!process.env[k]) {
       core.info(`Setting ${k}=${v}`)
@@ -347,15 +370,7 @@ async function setEnvVars(): Promise<void> {
   const logLevel = core.getInput('log_level')
   if (logLevel) set('MISE_LOG_LEVEL', logLevel)
 
-  const githubToken = core.getInput('github_token')
-  if (githubToken) {
-    // Don't use GITHUB_TOKEN, use MISE_GITHUB_TOKEN instead to avoid downstream issues.
-    set('MISE_GITHUB_TOKEN', githubToken)
-  } else {
-    core.warning(
-      'No MISE_GITHUB_TOKEN provided. You may hit GitHub API rate limits when installing tools from GitHub.'
-    )
-  }
+  setupGitHubToken()
 
   set('MISE_TRUSTED_CONFIG_PATHS', process.cwd())
   set('MISE_YES', '1')
@@ -384,15 +399,18 @@ async function restoreMiseCache(): Promise<string | undefined> {
 
   if (!cacheKey) {
     core.info(`mise cache not found for ${primaryKey}`)
-    return primaryKey
+  } else {
+    core.info(`mise cache restored from key: ${cacheKey}`)
   }
 
-  core.info(`mise cache restored from key: ${cacheKey}`)
+  return cacheKeyToSave(primaryKey, cacheKey)
 }
 
 async function setupMise(
   version: string,
-  fetchFromGitHub = false
+  fetchFromGitHub = false,
+  minimumReleaseAge = '',
+  autoUpdate = false
 ): Promise<void> {
   const miseBinDir = path.join(miseDir(), 'bin')
   const miseBinPath = path.join(
@@ -400,31 +418,115 @@ async function setupMise(
     process.platform === 'win32' ? 'mise.exe' : 'mise'
   )
   const miseShimPath = path.join(miseBinDir, 'mise-shim.exe')
-  let installedVersion: string | undefined
-  if (!fs.existsSync(path.join(miseBinPath))) {
+  const useMinimumReleaseAge = !version && Boolean(minimumReleaseAge.trim())
+  if (version && minimumReleaseAge.trim()) {
+    core.info(
+      '`minimum_release_age` is ignored because an explicit mise version was provided'
+    )
+  }
+  if (useMinimumReleaseAge) {
+    // Validate even when a cached binary means no release is resolved.
+    minimumReleaseAgeCutoff(minimumReleaseAge)
+  }
+  const versionFile = path.join(miseBinDir, 'mise-version')
+  let resolvedVersion = cleanVersion(version)
+  const target = await getTarget()
+  const assetNameFor = (v: string): string =>
+    `mise-v${v}-${target}${process.platform === 'win32' ? '.exe' : ''}`
+  // `auto_update` opts back in to comparing against the latest release. The
+  // main cache is only saved on a miss, so the updated binary is cached on its
+  // own, keyed by version, to avoid downloading it again on every run.
+  // GitHub includes the path list in the cache version, so restore and save
+  // must use the identical list.
+  const binCachePaths = [
+    miseBinPath,
+    ...(process.platform === 'win32' ? [miseShimPath] : []),
+    versionFile
+  ]
+  let binCacheKey: string | undefined
+  const useBinCache = async (v: string): Promise<void> => {
+    if (!core.getBooleanInput('cache')) return
+    binCacheKey = `mise-bin-v1-${target}-${getRunnerImageId()}-${v}`
+    await restoreMiseBinCache(binCacheKey, binCachePaths)
+  }
+  if (!resolvedVersion && autoUpdate) {
+    resolvedVersion = cleanVersion(
+      await latestMiseVersion(
+        useMinimumReleaseAge ? minimumReleaseAge : undefined
+      )
+    )
+    await useBinCache(resolvedVersion)
+  }
+  let needsInstall = !fs.existsSync(miseBinPath)
+  if (!needsInstall) {
+    // With `version` unset, a cached mise is kept until the cache is busted
+    // rather than chasing every release, so verify it against its own
+    // version's signed checksums instead of the latest release's.
+    // The cached binary is never executed before it is verified. Its version
+    // comes from a record written at install time; a tampered record can only
+    // make the check fail, since the checksum must match that version's signed
+    // release. Caches without a record (saved by older releases) are verified
+    // against the latest release. The main cache can't be re-saved after an
+    // exact hit, so the binary goes through the version-keyed binary cache;
+    // otherwise such a cache would reinstall mise on every run once a newer
+    // release exists.
+    let existingVersion =
+      resolvedVersion || readRecordedMiseVersion(versionFile)
+    if (!existingVersion) {
+      existingVersion = resolvedVersion = cleanVersion(
+        await latestMiseVersion(
+          useMinimumReleaseAge ? minimumReleaseAge : undefined
+        )
+      )
+      await useBinCache(existingVersion)
+    }
+    if (!needsInstall) {
+      try {
+        await verifyExistingMiseAsset(
+          miseBinPath,
+          existingVersion,
+          assetNameFor(existingVersion)
+        )
+        core.info(`Verified existing mise@${existingVersion}`)
+        resolvedVersion = existingVersion
+      } catch (err) {
+        if (!(err instanceof MiseIntegrityMismatchError)) throw err
+        core.warning(
+          `Existing mise failed integrity verification (${errorMessage(err)}); reinstalling`
+        )
+        await fs.promises.rm(miseBinPath, { force: true })
+        needsInstall = true
+      }
+    }
+  }
+  if (needsInstall && !resolvedVersion) {
+    resolvedVersion = cleanVersion(
+      await latestMiseVersion(
+        useMinimumReleaseAge ? minimumReleaseAge : undefined
+      )
+    )
+  }
+  const rawAssetName = assetNameFor(resolvedVersion)
+  const installedVersion = resolvedVersion
+  if (needsInstall) {
     core.startGroup(version ? `Download mise@${version}` : 'Setup mise')
     await fs.promises.mkdir(miseBinDir, { recursive: true })
     const ext =
       process.platform === 'win32'
         ? '.zip'
-        : version && version.startsWith('2024')
+        : resolvedVersion.startsWith('2024')
           ? ''
           : (await tarSupportsZstd())
             ? '.tar.zst'
             : '.tar.gz'
-    let resolvedVersion = version || (await latestMiseVersion())
-    resolvedVersion = resolvedVersion.replace(/^v/, '')
-    const target = await getTarget()
     const assetName = `mise-v${resolvedVersion}-${target}${ext}`
-    const rawAssetName = `mise-v${resolvedVersion}-${target}${
-      process.platform === 'win32' ? '.exe' : ''
-    }`
-    const fetchFromCdn = !fetchFromGitHub && !version
+    // The CDN only exposes the newest binary. An age-filtered release must be
+    // downloaded by its exact version from GitHub.
+    const fetchFromCdn = !fetchFromGitHub && !version && !useMinimumReleaseAge
     const githubUrl = `https://github.com/jdx/mise/releases/download/v${resolvedVersion}/${assetName}`
     const cdnUrl = `https://mise.jdx.dev/mise-latest-${target}${
       process.platform === 'win32' ? '.exe' : ''
     }`
-    installedVersion = resolvedVersion
     const installFromUrl = async (
       downloadUrl: string,
       downloadAssetName: string,
@@ -503,23 +605,11 @@ async function setupMise(
       )
       await installFromUrl(githubUrl, assetName, assetName, true)
     }
-  } else {
-    const requestedVersion = cleanVersion(core.getInput('version'))
-    if (requestedVersion !== '') {
-      installedVersion = await getInstalledMiseVersion(miseBinPath)
-      if (requestedVersion === installedVersion) {
-        core.info(`mise already installed`)
-      } else {
-        core.info(
-          `mise already installed (${installedVersion}), but different version requested (${requestedVersion})`
-        )
-        await exec.exec(miseBinPath, ['self-update', requestedVersion, '-y'])
-        core.info(`mise updated to version ${requestedVersion}`)
-        installedVersion = requestedVersion
-      }
-    }
   }
   await ensureWindowsMiseShim(miseBinPath, miseShimPath, installedVersion)
+  if (needsInstall) {
+    await fs.promises.writeFile(versionFile, installedVersion)
+  }
   // compare with provided hash
   const want = core.getInput('sha256')
   if (want) {
@@ -533,7 +623,42 @@ async function setupMise(
     }
   }
 
+  if (needsInstall && binCacheKey && core.getBooleanInput('cache_save')) {
+    await saveMiseBinCache(binCacheKey, binCachePaths)
+  }
+
   core.addPath(miseBinDir)
+}
+
+function readRecordedMiseVersion(versionFile: string): string | undefined {
+  try {
+    const recorded = cleanVersion(fs.readFileSync(versionFile, 'utf8').trim())
+    return /^[0-9A-Za-z][0-9A-Za-z._+-]*$/.test(recorded) ? recorded : undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function restoreMiseBinCache(
+  key: string,
+  paths: string[]
+): Promise<void> {
+  try {
+    if (await cache.restoreCache(paths, key)) {
+      core.info(`mise binary restored from key: ${key}`)
+    }
+  } catch (err) {
+    core.warning(`Failed to restore mise binary cache: ${errorMessage(err)}`)
+  }
+}
+
+async function saveMiseBinCache(key: string, paths: string[]): Promise<void> {
+  try {
+    await cache.saveCache(paths, key)
+    core.info(`mise binary cached with key: ${key}`)
+  } catch (err) {
+    core.warning(`Failed to save mise binary cache: ${errorMessage(err)}`)
+  }
 }
 
 async function withExtractedZip(
@@ -542,7 +667,29 @@ async function withExtractedZip(
   fn: (extractDir: string) => Promise<void>
 ): Promise<void> {
   const extractDir = path.join(tempDir, 'extract')
-  await exec.exec('unzip', [archivePath, '-d', extractDir])
+  // Windows PowerShell ships with every Windows runner, unlike `unzip`, which
+  // is missing on many self-hosted ones. Paths go through the environment to
+  // avoid quoting issues.
+  await exec.exec(
+    'powershell',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      // Process-scoped; a Restricted default policy (fresh Windows client
+      // installs) can otherwise block loading the Archive module.
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      'Expand-Archive -LiteralPath $env:MISE_ZIP_ARCHIVE -DestinationPath $env:MISE_ZIP_DEST -Force'
+    ],
+    {
+      env: {
+        ...(process.env as Record<string, string>),
+        MISE_ZIP_ARCHIVE: archivePath,
+        MISE_ZIP_DEST: extractDir
+      }
+    }
+  )
   await fn(extractDir)
 }
 
@@ -613,13 +760,30 @@ async function getDownloadTool(): Promise<DownloadTool> {
   return cachedDownloadTool
 }
 
+async function retryDownload<T>(fn: () => Promise<T>): Promise<T> {
+  for (let retry = 0; ; retry++) {
+    try {
+      return await fn()
+    } catch (err) {
+      if (err instanceof NonRetryableError || retry === DOWNLOAD_RETRIES)
+        throw err
+      core.warning(
+        `Download failed: ${errorMessage(err)}. Retrying in ${DOWNLOAD_RETRY_DELAY_MS / 1000} seconds (${retry + 1}/${DOWNLOAD_RETRIES}).`
+      )
+      await new Promise(resolve => setTimeout(resolve, DOWNLOAD_RETRY_DELAY_MS))
+    }
+  }
+}
+
 async function downloadToFile(url: string, filePath: string): Promise<void> {
   const tool = await getDownloadTool()
-  if (tool === 'curl') {
-    await exec.exec('curl', ['-fsSL', url, '--output', filePath])
-  } else {
-    await exec.exec('wget', ['-qO', filePath, url])
-  }
+  await retryDownload(async () => {
+    if (tool === 'curl') {
+      await exec.exec('curl', ['-fsSL', url, '--output', filePath])
+    } else {
+      await exec.exec('wget', ['-qO', filePath, url])
+    }
+  })
 }
 
 async function downloadText(url: string): Promise<string> {
@@ -628,16 +792,18 @@ async function downloadText(url: string): Promise<string> {
 
 async function downloadRawText(url: string): Promise<string> {
   const tool = await getDownloadTool()
-  if (tool === 'curl') {
-    const rsp = await exec.getExecOutput('curl', ['-fsSL', url], {
+  return retryDownload(async () => {
+    if (tool === 'curl') {
+      const rsp = await exec.getExecOutput('curl', ['-fsSL', url], {
+        silent: true
+      })
+      return rsp.stdout
+    }
+    const rsp = await exec.getExecOutput('wget', ['-qO-', url], {
       silent: true
     })
     return rsp.stdout
-  }
-  const rsp = await exec.getExecOutput('wget', ['-qO-', url], {
-    silent: true
   })
-  return rsp.stdout
 }
 
 async function withDownloadedMiseAsset(
@@ -683,6 +849,65 @@ async function verifyDownloadedMiseAsset(
     )
   }
   core.info(`Verified ${assetName} against signed checksums`)
+}
+
+async function verifyExistingMiseAsset(
+  filePath: string,
+  version: string,
+  assetName: string
+): Promise<void> {
+  const got = await sha256File(filePath)
+  const explicitChecksum = core.getInput('sha256')
+  if (explicitChecksum) {
+    if (got !== explicitChecksum) {
+      throw new MiseIntegrityMismatchError(
+        `SHA256 mismatch: expected ${explicitChecksum}, got ${got} for ${filePath}`
+      )
+    }
+    await verifyExistingMiseVersion(filePath, version)
+    core.info(`Verified existing mise against configured SHA256`)
+    return
+  }
+
+  const shasums = await verifiedMiseShasums(version)
+  if (!shasums) {
+    throw new MiseIntegrityMismatchError(
+      `Cannot verify existing mise ${version} without signed checksums`
+    )
+  }
+  let want: string
+  try {
+    want = checksumForAsset(shasums, assetName)
+  } catch (err) {
+    throw new MiseIntegrityMismatchError(
+      `Cannot verify existing mise ${version}: ${errorMessage(err)}`
+    )
+  }
+  if (got !== want) {
+    throw new MiseIntegrityMismatchError(
+      `SHA256 mismatch: expected ${want}, got ${got} for ${assetName}`
+    )
+  }
+  core.info(`Verified existing ${assetName} against signed checksums`)
+}
+
+async function verifyExistingMiseVersion(
+  filePath: string,
+  expectedVersion: string
+): Promise<void> {
+  let actualVersion: string
+  try {
+    actualVersion = await getInstalledMiseVersion(filePath)
+  } catch (err) {
+    throw new MiseIntegrityMismatchError(
+      `Could not determine the version of existing mise: ${errorMessage(err)}`
+    )
+  }
+  if (actualVersion !== expectedVersion) {
+    throw new MiseIntegrityMismatchError(
+      `Existing mise version ${actualVersion} does not match requested version ${expectedVersion}`
+    )
+  }
 }
 
 async function verifiedMiseShasums(
@@ -798,13 +1023,12 @@ async function installFromTarFile(
 }
 
 async function getInstalledMiseVersion(miseBinPath: string): Promise<string> {
-  const versionOutput = await exec.getExecOutput(
-    miseBinPath,
-    ['version', '--json'],
-    { silent: true }
-  )
-  const versionJson = JSON.parse(versionOutput.stdout) as { version: string }
-  return cleanVersion(versionJson.version.split(' ')[0])
+  const versionOutput = await exec.getExecOutput(miseBinPath, ['version'], {
+    silent: true
+  })
+  const version = versionOutput.stdout.trim().split(/\s+/)[0]
+  if (!version) throw new Error('mise did not report a version')
+  return cleanVersion(version)
 }
 
 function errorMessage(err: unknown): string {
@@ -821,8 +1045,125 @@ async function tarSupportsZstd(): Promise<boolean> {
   }
 }
 
-async function latestMiseVersion(): Promise<string> {
-  return downloadText('https://mise.jdx.dev/VERSION')
+function subtractUtcMonths(date: Date, months: number): void {
+  const day = date.getUTCDate()
+  date.setUTCDate(1)
+  date.setUTCMonth(date.getUTCMonth() - months)
+  const lastDay = new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)
+  ).getUTCDate()
+  date.setUTCDate(Math.min(day, lastDay))
+}
+
+function hasValidIsoCalendarDate(input: string): boolean {
+  const match = input.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (!match) return false
+  const [, yearText, monthText, dayText] = match
+  const year = Number(yearText)
+  const month = Number(monthText)
+  const day = Number(dayText)
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+  const daysInMonth = [
+    31,
+    leapYear ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31
+  ]
+  return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth[month - 1]
+}
+
+function minimumReleaseAgeCutoff(value: string, now = new Date()): Date {
+  const input = value.trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(input) && hasValidIsoCalendarDate(input)) {
+    const cutoff = new Date(`${input}T23:59:59Z`)
+    if (!Number.isNaN(cutoff.getTime())) return cutoff
+  }
+  if (/^\d{4}-\d{2}-\d{2}T/.test(input) && hasValidIsoCalendarDate(input)) {
+    const cutoff = new Date(input)
+    if (!Number.isNaN(cutoff.getTime())) return cutoff
+  }
+  if (/^\d+$/.test(input)) {
+    return new Date(now.getTime() - Number(input) * 1000)
+  }
+
+  const duration = /(\d+)(mo|ms|us|ns|y|w|d|h|m|s)/gy
+  let offset = 0
+  let months = 0
+  let milliseconds = 0
+  for (let match = duration.exec(input); match; match = duration.exec(input)) {
+    if (match.index !== offset) break
+    offset = duration.lastIndex
+    const amount = Number(match[1])
+    switch (match[2]) {
+      case 'y':
+        months += amount * 12
+        break
+      case 'mo':
+        months += amount
+        break
+      case 'w':
+        milliseconds += amount * 7 * 24 * 60 * 60 * 1000
+        break
+      case 'd':
+        milliseconds += amount * 24 * 60 * 60 * 1000
+        break
+      case 'h':
+        milliseconds += amount * 60 * 60 * 1000
+        break
+      case 'm':
+        milliseconds += amount * 60 * 1000
+        break
+      case 's':
+        milliseconds += amount * 1000
+        break
+      case 'ms':
+        milliseconds += amount
+        break
+      case 'us':
+        milliseconds += amount / 1000
+        break
+      case 'ns':
+        milliseconds += amount / 1_000_000
+        break
+    }
+  }
+  if (!input || offset !== input.length) {
+    throw new Error(
+      `Invalid minimum_release_age: ${value}. Expected a duration such as 24h, 7d, 6mo, or 1y, or an ISO date or timestamp.`
+    )
+  }
+
+  const cutoff = new Date(now)
+  if (months) subtractUtcMonths(cutoff, months)
+  cutoff.setTime(cutoff.getTime() - milliseconds)
+  return cutoff
+}
+
+async function latestMiseVersion(minimumReleaseAge?: string): Promise<string> {
+  if (!minimumReleaseAge) {
+    return downloadText('https://mise.jdx.dev/VERSION')
+  }
+
+  const cutoff = minimumReleaseAgeCutoff(minimumReleaseAge)
+  const index = await downloadText('https://mise.jdx.dev/releases.tsv')
+  const release = selectMiseRelease(index, cutoff)
+  if (!release) {
+    throw new Error(
+      `No stable mise release satisfies minimum_release_age=${minimumReleaseAge}`
+    )
+  }
+  core.info(
+    `Selected mise ${release.version}, released ${new Date(release.publishedAt * 1000).toISOString()}, with minimum_release_age=${minimumReleaseAge}`
+  )
+  return release.version
 }
 
 async function setToolVersions(): Promise<void> {
@@ -835,6 +1176,13 @@ async function setToolVersions(): Promise<void> {
 async function setMiseToml(): Promise<void> {
   const toml = core.getInput('mise_toml')
   if (toml) {
+    // mise loads `.mise.toml` ahead of `mise.toml` in the same directory, so
+    // a repo `.mise.toml` would silently win over this input.
+    if (fs.existsSync('.mise.toml')) {
+      core.warning(
+        '`.mise.toml` exists in the current directory and takes precedence over the `mise_toml` input, which is written to `mise.toml`. Rename it to `mise.toml` or remove it for `mise_toml` to take effect.'
+      )
+    }
     await writeFile('mise.toml', toml)
   }
 }
@@ -886,6 +1234,38 @@ const miseBootstrap = async (): Promise<number> => {
   return mise([command])
 }
 const miseLs = async (): Promise<number> => mise([`ls`])
+
+/**
+ * Install the plugins from the `plugins` input before tools are installed, so
+ * tools and idiomatic version files that need them resolve. Installing a
+ * plugin that is already present (e.g. from the cache) only warns.
+ */
+async function miseInstallPlugins(): Promise<void> {
+  for (const { name, url } of parsePlugins(core.getInput('plugins'))) {
+    await mise(['plugins', 'install', '-y', name, ...(url ? [url] : [])])
+  }
+}
+
+/**
+ * Expose the active tool versions as outputs: `versions` (JSON) and one output
+ * per tool. A failure here only warns; it must not fail the job.
+ */
+async function setToolVersionOutputs(): Promise<void> {
+  try {
+    const { stdout } = await exec.getExecOutput(
+      'mise',
+      ['ls', '--json', '--current'],
+      { cwd: getCwd(), silent: true }
+    )
+    const { versions, outputs } = toolVersionOutputs(JSON.parse(stdout))
+    core.setOutput('versions', JSON.stringify(versions))
+    for (const [tool, version] of Object.entries(outputs)) {
+      core.setOutput(tool, version)
+    }
+  } catch (err) {
+    core.warning(`Unable to set tool version outputs: ${errorMessage(err)}`)
+  }
+}
 const miseReshim = async (): Promise<number> => mise([`reshim`, `-f`])
 const mise = async (args: string[]): Promise<number> =>
   await core.group(`Running mise ${args.join(' ')}`, async () => {
@@ -915,7 +1295,24 @@ const writeFile = async (p: fs.PathLike, body: string): Promise<void> =>
     await fs.promises.writeFile(p, body, { encoding: 'utf8' })
   })
 
-run()
+/** Post step: save the cache deferred by `cache_save_post`. */
+async function post(): Promise<void> {
+  const cacheKey = core.getState('SAVE_CACHE_KEY')
+  if (!cacheKey) return
+  try {
+    await saveCache(cacheKey)
+  } catch (err) {
+    // The job's work is done; a failed cache save should not fail it.
+    core.warning(`Failed to save mise cache: ${errorMessage(err)}`)
+  }
+}
+
+if (core.getState('IS_POST')) {
+  void post()
+} else {
+  core.saveState('IS_POST', 'true')
+  void run()
+}
 
 function getCwd(): string {
   return (
@@ -1085,6 +1482,18 @@ async function processCacheKeyTemplate(template: string): Promise<string> {
     }
   }
 
+  // Plugins are cached with the rest of mise's data and an installed plugin is
+  // left alone, so a changed plugin URL or ref has to change the key.
+  let pluginsHash = ''
+  const plugins = parsePlugins(core.getInput('plugins'))
+  if (plugins.length > 0) {
+    const normalized = plugins
+      .map(({ name, url }) => `${name} ${url ?? ''}`)
+      .sort()
+      .join('\n')
+    pluginsHash = crypto.createHash('sha256').update(normalized).digest('hex')
+  }
+
   let bootstrapHash = ''
   if (bootstrap) {
     bootstrapHash = crypto
@@ -1101,7 +1510,8 @@ async function processCacheKeyTemplate(template: string): Promise<string> {
     file_hash: fileHash,
     mise_env: miseEnv,
     install_args_hash: installArgsHash,
-    bootstrap_hash: bootstrapHash
+    bootstrap_hash: bootstrapHash,
+    plugins_hash: pluginsHash
   }
 
   // Calculate the default cache key by processing the default template
