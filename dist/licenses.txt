@@ -1644,7 +1644,7 @@ License Text:
 ---
 
 Name: handlebars
-Version: 4.7.9
+Version: 4.7.10
 License: MIT
 Private: false
 Description: Handlebars provides the power necessary to let you build semantic templates effectively with no frustration
