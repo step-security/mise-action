@@ -14,6 +14,7 @@ concurrency:
 
 jobs:
   build: # make sure build/ci work properly
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -130,6 +131,7 @@ jobs:
         run: test "$MISE_GITHUB_TOKEN" = "mise-action-persist-test-token"
 
   path_opt_out:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -161,6 +163,7 @@ jobs:
           fi
 
   specific_version:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -192,6 +195,7 @@ jobs:
           sha256: d38d4993c5379a680b50661f86287731dc1d1264777880a79b786403af337948
 
   minimum_release_age:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -292,6 +296,7 @@ jobs:
           test "$actual" = "$expected"
 
   checksum_failure:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -325,6 +330,7 @@ jobs:
           STEPS_BAD_OUTCOME: ${{ steps.bad.outcome }}
 
   cached_version_change:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -351,6 +357,7 @@ jobs:
         run: test "$(mise version --json | jq -r '.version | split(" ")[0]')" = 2025.7.2
 
   pre_minisign_cached:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -388,6 +395,7 @@ jobs:
       - run: mise --version
 
   custom_cache_key:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -410,7 +418,49 @@ jobs:
       - run: which jq
       - run: jq --version
 
+  mise_dir_sets_data_dir:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup mise with a custom mise_dir
+        uses: $/
+        env:
+          # The input must win over a different value set by the workflow.
+          MISE_DATA_DIR: ${{ runner.temp }}/ignored-data-dir
+        with:
+          cache: false
+          install: false
+          mise_dir: ${{ runner.temp }}/mise-data-dir
+      - name: Check mise uses mise_dir as its data directory
+        shell: bash
+        run: |
+          test "$MISE_DATA_DIR" = "$RUNNER_TEMP/mise-data-dir"
+          test "$(mise doctor --json | jq -r '.dirs.data')" = "$RUNNER_TEMP/mise-data-dir"
+
+  mise_dir_matching_data_dir:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup mise with a step-level MISE_DATA_DIR equal to mise_dir
+        uses: $/
+        env:
+          MISE_DATA_DIR: ${{ runner.temp }}/mise-data-dir
+        with:
+          cache: false
+          install: false
+          mise_dir: ${{ runner.temp }}/mise-data-dir
+      - name: Check later steps still use mise_dir
+        shell: bash
+        run: test "$MISE_DATA_DIR" = "$RUNNER_TEMP/mise-data-dir"
+
   fetch_from_github:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -435,6 +485,7 @@ jobs:
       - run: jq --version
 
   download_retry:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -477,6 +528,7 @@ jobs:
         run: test "$(cat "$MISE_ACTION_CURL_ATTEMPTS")" = 3
 
   test-typescript:
+    timeout-minutes: 10
     name: TypeScript Tests
     runs-on: ubuntu-latest
 
@@ -508,6 +560,7 @@ jobs:
       #   run: npm run ci-test
 
   check-dist:
+    timeout-minutes: 10
     name: Check dist/
     runs-on: ubuntu-latest
 
@@ -538,6 +591,7 @@ jobs:
           fi
 
   test-redacted-env:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
 
     steps:
@@ -616,6 +670,8 @@ jobs:
       - cached_version_change
       - pre_minisign_cached
       - custom_cache_key
+      - mise_dir_sets_data_dir
+      - mise_dir_matching_data_dir
       - download_retry
       - fetch_from_github
     runs-on: ubuntu-latest

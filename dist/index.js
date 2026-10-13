@@ -119154,6 +119154,15 @@ async function setEnvVars() {
     const logLevel = getInput('log_level');
     if (logLevel)
         set('MISE_LOG_LEVEL', logLevel);
+    // The input outranks MISE_DATA_DIR in miseDir(), so mise must use it too or
+    // tools would install outside the directory that is cached. Export even when
+    // a step-level MISE_DATA_DIR already matches, since that value does not
+    // reach later steps.
+    const dataDir = getInput('mise_dir');
+    if (dataDir) {
+        info(`Setting MISE_DATA_DIR=${dataDir}`);
+        exportVariable('MISE_DATA_DIR', dataDir);
+    }
     setupGitHubToken();
     set('MISE_TRUSTED_CONFIG_PATHS', process.cwd());
     set('MISE_YES', '1');
@@ -119194,6 +119203,8 @@ async function setupMise(version, fetchFromGitHub = false, minimumReleaseAge = '
         minimumReleaseAgeCutoff(minimumReleaseAge);
     }
     const versionFile = path$1.join(miseBinDir, 'mise-version');
+    // Read before a binary-cache restore can overwrite the record.
+    const originalRecordedVersion = readRecordedMiseVersion(versionFile);
     let resolvedVersion = cleanVersion(version);
     const target = await getTarget();
     const assetNameFor = (v) => `mise-v${v}-${target}${process.platform === 'win32' ? '.exe' : ''}`;
@@ -119236,6 +119247,7 @@ async function setupMise(version, fetchFromGitHub = false, minimumReleaseAge = '
             existingVersion = resolvedVersion = cleanVersion(await latestMiseVersion(useMinimumReleaseAge ? minimumReleaseAge : undefined));
             await useBinCache(existingVersion);
         }
+        let existingInUse = false;
         if (!needsInstall) {
             try {
                 await verifyExistingMiseAsset(miseBinPath, existingVersion, assetNameFor(existingVersion));
@@ -119246,8 +119258,34 @@ async function setupMise(version, fetchFromGitHub = false, minimumReleaseAge = '
                 if (!(err instanceof MiseIntegrityMismatchError))
                     throw err;
                 warning(`Existing mise failed integrity verification (${errorMessage(err)}); reinstalling`);
-                await fs.promises.rm(miseBinPath, { force: true });
-                needsInstall = true;
+                try {
+                    await fs.promises.rm(miseBinPath, { force: true });
+                }
+                catch (rmErr) {
+                    // Windows cannot delete a running executable, e.g. when a
+                    // long-running process still uses the action-managed mise.
+                    if (!isFileInUseError(rmErr))
+                        throw rmErr;
+                    const recorded = version ? '' : originalRecordedVersion;
+                    if (recorded && recorded !== existingVersion) {
+                        try {
+                            await verifyExistingMiseAsset(miseBinPath, recorded, assetNameFor(recorded));
+                            warning(`Could not update mise because ${miseBinPath} is in use (${errorMessage(rmErr)}); continuing with the verified existing mise@${recorded}`);
+                            resolvedVersion = recorded;
+                            await fs.promises.writeFile(versionFile, recorded);
+                            existingInUse = true;
+                        }
+                        catch (verifyErr) {
+                            if (!(verifyErr instanceof MiseIntegrityMismatchError)) {
+                                throw verifyErr;
+                            }
+                        }
+                    }
+                    if (!existingInUse) {
+                        throw new Error(`Could not replace ${miseBinPath} because it is in use (${errorMessage(rmErr)}). Stop the process using it and rerun, or set \`version\` to the installed mise version.`, { cause: rmErr });
+                    }
+                }
+                needsInstall = !existingInUse;
             }
         }
     }
@@ -119334,6 +119372,14 @@ async function setupMise(version, fetchFromGitHub = false, minimumReleaseAge = '
         await saveMiseBinCache(binCacheKey, binCachePaths);
     }
     addPath(miseBinDir);
+}
+function isFileInUseError(err) {
+    // Only Windows refuses to delete a running executable; on Unix these codes
+    // mean a real permission problem that should propagate.
+    if (process.platform !== 'win32')
+        return false;
+    const code = err?.code;
+    return code === 'EPERM' || code === 'EBUSY' || code === 'EACCES';
 }
 function readRecordedMiseVersion(versionFile) {
     try {

@@ -5,8 +5,8 @@
   "action_type": "node",
   "upstream": {
     "repository": "jdx/mise-action",
-    "synced_tag": "v5.1.1",
-    "synced_commit": "2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca",
+    "synced_tag": "v5.1.2",
+    "synced_commit": "08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8",
     "archived": false
   },
   "build": {

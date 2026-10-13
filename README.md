@@ -150,7 +150,7 @@ The built-in cache uses GitHub's cache. To store the cache elsewhere (for exampl
     cache: false
 ```
 
-The path to cache is mise's data directory, `~/.local/share/mise` by default (`%LOCALAPPDATA%\mise` on Windows). The action uses the first of these that is set: its `mise_dir` input, then `MISE_DATA_DIR`, then `$XDG_DATA_HOME/mise`, then the default above. If several are set, `path` must be the directory that wins in that order. Build the key from your config files as above (list every config name your repo uses, including environment-specific `mise.<env>.toml` files, since the key must change whenever the tools do), and add anything else that should invalidate it (`install_args`, `MISE_ENV`, the runner image).
+The path to cache is mise's data directory, `~/.local/share/mise` by default (`%LOCALAPPDATA%\mise` on Windows). The action uses the first of these that is set: its `mise_dir` input, then `MISE_DATA_DIR`, then `$XDG_DATA_HOME/mise`, then the default above. When `mise_dir` is set, the action also exports it as `MISE_DATA_DIR` so mise installs tools into the cached directory; mise's state directory is unaffected (set `MISE_STATE_DIR` to move it). If several are set, `path` must be the directory that wins in that order. Build the key from your config files as above (list every config name your repo uses, including environment-specific `mise.<env>.toml` files, since the key must change whenever the tools do), and add anything else that should invalidate it (`install_args`, `MISE_ENV`, the runner image).
 
 ### Template Variables in Cache Keys
 
@@ -199,9 +199,11 @@ This gives you full control over cache invalidation based on the specific aspect
 
 Rust has a known cache interaction because mise installs Rust through `rustup`.
 
-mise records that Rust is installed in its own data directory, but `rustup` keeps the toolchain, components (`rustfmt`, `clippy`, ...), and targets in `~/.rustup` and `~/.cargo`. The action only caches the mise data directory, so a cache restore can bring back mise's "installed" marker without the components, and later steps fail with errors like a missing `rustfmt`. GitHub-hosted runners also ship their own `rustup`, which mise may reuse instead of installing its own.
+mise records that Rust is installed in its own data directory, but `rustup` keeps the toolchain, components (`rustfmt`, `clippy`, ...), and targets in `~/.rustup` and `~/.cargo`. The action only caches the mise data directory, so a cache restore can bring back mise's "installed" marker without the toolchain or its components. GitHub-hosted runners also ship their own `rustup`, which mise may reuse instead of installing its own.
 
-Two ways to deal with it:
+With mise 2026.9.2 or newer, `mise install` (the action's default) notices this and repairs it: it checks the rustup toolchain and its components and re-downloads whatever is missing instead of trusting the marker. Later steps no longer fail with errors like a missing `rustfmt`. The remaining cost is that the toolchain is downloaded again on every run, because rustup's state isn't cached. With older mise versions, or when the action doesn't run `mise install` (`install: false`), the restored marker is trusted and those errors can still happen.
+
+Two ways to avoid the re-download:
 
 1. Keep rustup's state inside the mise data directory so it is cached together with it. This is complete, but the cache can get large (around 2.5 GB with several components and targets):
 
@@ -213,7 +215,9 @@ Two ways to deal with it:
 
    These are the Linux paths (macOS runners use `/Users/runner/...`). On Windows the action caches `%LOCALAPPDATA%\mise` by default, so on GitHub-hosted Windows runners use `C:\Users\runneradmin\AppData\Local\mise\rustup` and `C:\Users\runneradmin\AppData\Local\mise\cargo` (on other runners, the same paths under that runner's `%LOCALAPPDATA%`). If you customize `mise_dir`, `MISE_DATA_DIR`, or `XDG_DATA_HOME`, keep these paths under the same directory.
 
-2. Don't cache the toolchain through the action. Install Rust with `rustup` (or a dedicated action) and a Rust cache such as [step-security/rust-cache](https://github.com/step-security/rust-cache), and let mise manage everything else. For this to work, mise must no longer manage Rust: remove `rust` from `mise.toml` / `.tool-versions` (or keep it only in a config the CI job doesn't use, for example behind `MISE_ENV`), because the action runs `mise install` by default and would otherwise install Rust through mise and cache its install record again.
+2. Cache the Rust build outputs separately. A Rust cache such as [Swatinem/rust-cache](https://github.com/Swatinem/rust-cache) caches the cargo registry and `target/`, not the toolchain, so it works alongside mise managing Rust: mise reinstalls the toolchain on each run (see above) and the cache covers the expensive part. If you would rather not download the toolchain at all, install Rust with `rustup` (or a dedicated action) and remove `rust` from `mise.toml` / `.tool-versions` (or keep it only in a config the CI job doesn't use, for example behind `MISE_ENV`), because the action runs `mise install` by default and would otherwise install Rust through mise and cache its install record again.
+
+See [jdx/mise-action#215](https://github.com/jdx/mise-action/issues/215) for the discussion.
 
 ## Matrix Builds
 
@@ -325,3 +329,31 @@ jobs:
         echo "$HOME/.local/share/mise/bin" >> $GITHUB_PATH
         echo "$HOME/.local/share/mise/shims" >> $GITHUB_PATH
 ```
+
+## Install a subset of configured tools
+
+When a job needs only some of the tools in your `mise.toml`, set mise's
+[`MISE_ENABLE_TOOLS`](https://mise.jdx.dev/configuration/settings.html#enable_tools)
+setting at the job level:
+
+```yaml
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      MISE_ENABLE_TOOLS: rust
+    steps:
+      - uses: actions/checkout@v7
+      - uses: step-security/mise-action@v4
+        with:
+          cache_key_prefix: mise-v0-${{ env.MISE_ENABLE_TOOLS }}
+      - run: mise run validate
+```
+
+This is a mise setting, not a mise-action input. Setting it at the job level
+limits the tools mise enables both when the action installs tools and in later
+commands such as `mise run`. By contrast, `install_args` only limits the tools
+installed by the action's `mise install` invocation; a later `mise run` may
+install other configured tools. Include the setting in a custom cache key when
+different jobs use different allowlists, as the default key does not include
+`MISE_ENABLE_TOOLS`.
