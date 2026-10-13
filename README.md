@@ -215,9 +215,7 @@ Two ways to avoid the re-download:
 
    These are the Linux paths (macOS runners use `/Users/runner/...`). On Windows the action caches `%LOCALAPPDATA%\mise` by default, so on GitHub-hosted Windows runners use `C:\Users\runneradmin\AppData\Local\mise\rustup` and `C:\Users\runneradmin\AppData\Local\mise\cargo` (on other runners, the same paths under that runner's `%LOCALAPPDATA%`). If you customize `mise_dir`, `MISE_DATA_DIR`, or `XDG_DATA_HOME`, keep these paths under the same directory.
 
-2. Cache the Rust build outputs separately. A Rust cache such as [Swatinem/rust-cache](https://github.com/Swatinem/rust-cache) caches the cargo registry and `target/`, not the toolchain, so it works alongside mise managing Rust: mise reinstalls the toolchain on each run (see above) and the cache covers the expensive part. If you would rather not download the toolchain at all, install Rust with `rustup` (or a dedicated action) and remove `rust` from `mise.toml` / `.tool-versions` (or keep it only in a config the CI job doesn't use, for example behind `MISE_ENV`), because the action runs `mise install` by default and would otherwise install Rust through mise and cache its install record again.
-
-See [jdx/mise-action#215](https://github.com/jdx/mise-action/issues/215) for the discussion.
+2. Cache the Rust build outputs separately. A Rust cache such as [step-security/rust-cache](https://github.com/step-security/rust-cache) caches the cargo registry and `target/`, not the toolchain, so it works alongside mise managing Rust: mise reinstalls the toolchain on each run (see above) and the cache covers the expensive part. If you would rather not download the toolchain at all, install Rust with `rustup` (or a dedicated action) and remove `rust` from `mise.toml` / `.tool-versions` (or keep it only in a config the CI job doesn't use, for example behind `MISE_ENV`), because the action runs `mise install` by default and would otherwise install Rust through mise and cache its install record again.
 
 ## Matrix Builds
 
@@ -344,7 +342,7 @@ jobs:
       MISE_ENABLE_TOOLS: rust
     steps:
       - uses: actions/checkout@v7
-      - uses: step-security/mise-action@v4
+      - uses: step-security/mise-action@v5
         with:
           cache_key_prefix: mise-v0-${{ env.MISE_ENABLE_TOOLS }}
       - run: mise run validate
