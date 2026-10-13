@@ -7,7 +7,17 @@ branding:
 inputs:
   version:
     required: false
-    description: The version of mise to use. If not specified, will use the latest release.
+    description: The version of mise to use. If not specified, uses the newest release satisfying minimum_release_age.
+  auto_update:
+    required: false
+    default: "false"
+    description: When `version` is unset, reinstall a cached mise if a newer release is available. By default a cached mise is kept until the cache key changes.
+  minimum_release_age:
+    required: false
+    default: "24h"
+    description: |
+      When version is not specified, only install stable mise releases older than this threshold. Defaults to 24h; set 0s to disable the delay.
+      Accepts relative durations such as 24h, 7d, 6mo, or 1y, and absolute ISO dates or timestamps.
   sha256:
     required: false
     description: The SHA256 checksum of the mise binary to verify the download.
@@ -27,6 +37,10 @@ inputs:
     required: false
     default: "true"
     description: if false, will not run `mise install` or `mise bootstrap`
+  plugins:
+    required: false
+    default: ""
+    description: 'Plugins to install before tools, one per line as `name` or `name url`, e.g. `yarn` or `php https://github.com/verzly/mise-php#latest`. Useful for idiomatic version files (such as .yvmrc) that need a plugin.'
   install_args:
     required: false
     description: Arguments to pass to `mise install` such as "bun" to only install bun. When a repo mise lock file is present, the action automatically adds `--locked` unless you already provided it.
@@ -51,6 +65,10 @@ inputs:
     required: false
     default: "true"
     description: if false, action will not write to cache
+  cache_save_post:
+    required: false
+    default: "false"
+    description: if true, save the cache in the post step instead of right after install, so tools installed by later steps (e.g. monorepo sub-projects or task tools) are included. Only applies on a cache miss. The post step runs even if a later step fails, as the immediate save would have.
   cache_key_prefix:
     required: false
     default: "mise-v1"
@@ -85,8 +103,15 @@ inputs:
     required: false
     description: |
       GitHub token for API authentication to avoid rate limits when installing GitHub-hosted tools.
-      Defaults to the automatic GitHub token.
+      Defaults to the automatic GitHub token. Used only during this action unless persist_github_token is set.
     default: ${{ github.token }}
+  persist_github_token:
+    required: false
+    default: "false"
+    description: |
+      Persist MISE_GITHUB_TOKEN for subsequent steps. false (default) keeps github_token local to this action.
+      true exports the token used by this action (env.MISE_GITHUB_TOKEN takes precedence over github_token).
+      A token value exports that credential instead, while this action continues to use github_token or env.MISE_GITHUB_TOKEN.
   fetch_from_github:
     required: false
     default: "true"
@@ -132,6 +157,10 @@ inputs:
 outputs:
   cache-hit:
     description: A boolean value to indicate if a cache was hit.
+  versions:
+    description: JSON object of the active, installed tool versions, keyed by tool name. Each value is a list of `{version, requested_version, install_path, source}`. Every tool is also available as its own output (e.g. `steps.mise.outputs.node`) when its name is a valid output name.
 runs:
   using: node24
   main: dist/index.js
+  post: dist/index.js
+  post-if: always()
