@@ -1,7 +1,7 @@
 {
   "name": "@step-security/mise-action",
   "description": "mise tool setup action",
-  "version": "5.1.1",
+  "version": "5.1.2",
   "author": "step-security",
   "publisher": "step-security",
   "type": "module",
