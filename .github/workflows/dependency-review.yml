@@ -24,7 +24,7 @@ jobs:
       - name: 'Checkout Repository'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: 'Dependency Review'
-        uses: actions/dependency-review-action@1e966ba708e4b64bb0c9bfb7abb5a232840be16a # v4
+        uses: actions/dependency-review-action@789feb0d345fabae66e2f42aa6c3e49ff814c35a # v4
         with:
           # minimatch 10.2.6 is pinned by @actions/glob@0.7.0 (latest); see osv-scanner.toml
           allow-ghsas: GHSA-g3hv-75wg-m249
